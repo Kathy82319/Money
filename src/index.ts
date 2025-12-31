@@ -56,20 +56,25 @@ app.get('/api/transactions', async (c) => {
 })
 
 app.get('/api/stats', async (c) => {
-    const year = c.req.query('year') || '2025' // 預設 2025
+    const year = c.req.query('year') || '2025'
     
+    // 排除 '借入/負債' 和 '帳戶間移轉'，避免這些非實質收支影響圖表
+    const excludeFilter = `AND c.name NOT IN ('借入/負債', '帳戶間移轉', '帳戶間移轉')`
+
     const { results: totals } = await c.env.DB.prepare(`
-        SELECT type, SUM(amount_twd) as total 
-        FROM transactions 
-        WHERE strftime('%Y', date) = ? AND parent_id IS NULL
-        GROUP BY type
+        SELECT t.type, SUM(t.amount_twd) as total 
+        FROM transactions t
+        LEFT JOIN categories c ON t.category_id = c.id
+        WHERE strftime('%Y', t.date) = ? AND t.parent_id IS NULL ${excludeFilter}
+        GROUP BY t.type
     `).bind(year).all()
 
     const { results: monthly } = await c.env.DB.prepare(`
-        SELECT strftime('%Y-%m', date) as month, type, SUM(amount_twd) as total 
-        FROM transactions 
-        WHERE strftime('%Y', date) = ? AND parent_id IS NULL
-        GROUP BY month, type
+        SELECT strftime('%Y-%m', t.date) as month, t.type, SUM(t.amount_twd) as total 
+        FROM transactions t
+        LEFT JOIN categories c ON t.category_id = c.id
+        WHERE strftime('%Y', t.date) = ? AND t.parent_id IS NULL ${excludeFilter}
+        GROUP BY month, t.type
         ORDER BY month
     `).bind(year).all()
 
@@ -77,7 +82,7 @@ app.get('/api/stats', async (c) => {
         SELECT c.name, t.type, SUM(t.amount_twd) as total
         FROM transactions t
         JOIN categories c ON t.category_id = c.id
-        WHERE strftime('%Y', date) = ? 
+        WHERE strftime('%Y', t.date) = ? ${excludeFilter}
         GROUP BY c.name, t.type
         ORDER BY total DESC
     `).bind(year).all()
@@ -92,7 +97,6 @@ app.delete('/api/transactions/:id', async (c) => {
     } catch (e: any) { return c.json({ error: e.message }, 500) }
 })
 
-// [NEW] 編輯交易 API (PUT)
 app.put('/api/transactions/:id', async (c) => {
     try {
         const id = c.req.param('id')
@@ -102,15 +106,12 @@ app.put('/api/transactions/:id', async (c) => {
 
         if (!main.date || !main.account_id || main.amount_twd === undefined) return c.json({ error: '缺少欄位' }, 400)
 
-        // 1. 更新主交易
         await c.env.DB.prepare(`
             UPDATE transactions 
             SET date=?, account_id=?, category_id=?, type=?, amount_twd=?, note=?
             WHERE id=?
         `).bind(main.date, main.account_id, main.category_id, main.type, main.amount_twd, main.note, id).run()
 
-        // 2. 處理細項 (簡單做法：刪除舊細項，新增新細項)
-        // 注意：這需要 D1 支援 Transaction，若不支援可能會有一瞬間資料不一致，但此場景可接受
         await c.env.DB.prepare('DELETE FROM transactions WHERE parent_id = ?').bind(id).run()
 
         if (children.length > 0) {
@@ -224,7 +225,7 @@ app.get('/', (c) => {
                             <i class="fa-solid fa-shield-cat absolute -bottom-4 -right-4 text-8xl opacity-10"></i>
                         </div>
                         <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                            <div class="text-slate-500 text-sm mb-1">年度總收入</div>
+                            <div class="text-slate-500 text-sm mb-1">年度總收入 <span class="text-xs text-slate-300">(不含借貸/轉帳)</span></div>
                             <div class="text-3xl font-bold text-emerald-600">+{{ formatCurrency(stats.income) }}</div>
                         </div>
                         <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
@@ -256,9 +257,7 @@ app.get('/', (c) => {
 
                 <div v-if="currentView === 'add'" class="max-w-4xl mx-auto flex flex-col gap-6">
                     <div class="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden relative">
-                        <div v-if="editingId" class="bg-amber-100 text-amber-800 text-xs font-bold text-center py-1">
-                            正在編輯交易 (ID: {{ editingId }})
-                        </div>
+                        <div v-if="editingId" class="bg-amber-100 text-amber-800 text-xs font-bold text-center py-1">正在編輯 (ID: {{ editingId }})</div>
 
                         <div class="bg-slate-50 p-4 border-b border-slate-100 flex justify-center">
                             <div class="flex bg-slate-200/50 p-1 rounded-xl w-full max-w-md">
@@ -360,18 +359,22 @@ app.get('/', (c) => {
                                 </thead>
                                 <tbody class="divide-y divide-slate-50 text-sm">
                                     <template v-for="t in detailTransactions" :key="t.id">
-                                        <tr class="hover:bg-slate-50 group cursor-pointer" @click="t.expanded = !t.expanded">
+                                        <tr :class="['hover:bg-slate-50 group cursor-pointer', t.type==='BALANCE'?'bg-slate-100 text-slate-500 font-bold':'']" @click="t.expanded = !t.expanded">
                                             <td class="p-4 text-center"><i v-if="t.children?.length" :class="['fa-solid text-xs text-slate-300', t.expanded?'fa-chevron-down':'fa-chevron-right']"></i></td>
-                                            <td class="p-4 text-slate-500 font-mono">{{ t.date }}</td>
+                                            <td class="p-4 font-mono">{{ t.date }}</td>
                                             <td class="p-4">
-                                                <div class="font-bold text-slate-700">{{ t.children?.length ? t.note || '多筆交易' : t.category_name }}</div>
+                                                <div :class="t.type==='BALANCE'?'':'font-bold text-slate-700'">{{ t.children?.length ? t.note || '多筆交易' : (t.type==='BALANCE' ? '初始餘額' : t.category_name) }}</div>
                                                 <div class="text-xs text-slate-400" v-if="t.children?.length">{{ t.children.length }} 筆明細</div>
                                             </td>
-                                            <td :class="['p-4 text-right font-mono font-bold', t.type==='INCOME'?'text-emerald-600':'text-rose-600']">{{ t.type==='EXPENSE'?'-':'+' }}{{ formatCurrency(t.amount_twd, currentAccount?.currency) }}</td>
+                                            <td :class="['p-4 text-right font-mono font-bold', t.type==='INCOME'?'text-emerald-600':(t.type==='EXPENSE'?'text-rose-600':'')]">
+                                                {{ t.type==='EXPENSE'?'-':(t.type==='INCOME'?'+':'') }}{{ t.amount_twd ? formatCurrency(t.amount_twd, currentAccount?.currency) : '-' }}
+                                            </td>
                                             <td class="p-4 text-right font-mono text-slate-500">{{ formatCurrency(t.running_balance, currentAccount?.currency) }}</td>
                                             <td class="p-4 text-center space-x-2" @click.stop>
-                                                <button @click="editTransaction(t)" class="text-slate-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-pen"></i></button>
-                                                <button @click="deleteTransaction(t.id)" class="text-slate-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-trash-can"></i></button>
+                                                <div v-if="t.type!=='BALANCE'">
+                                                    <button @click="editTransaction(t)" class="text-slate-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-pen"></i></button>
+                                                    <button @click="deleteTransaction(t.id)" class="text-slate-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-trash-can"></i></button>
+                                                </div>
                                             </td>
                                         </tr>
                                         <tr v-if="t.expanded && t.children?.length" class="bg-slate-50/80 shadow-inner">
@@ -396,15 +399,18 @@ app.get('/', (c) => {
       <script>
         const { createApp, ref, computed, onMounted, watch, nextTick } = Vue
         let barChartInstance = null, pieChartInstance = null
+        
+        // 初始餘額設定
+        const initialBalances = { 1: 170687, 2: 66892, 3: 0, 4: 84565, 5: 620623, 6: 35030, 7: 52917, 8: 0, 9: 887203 }
 
         createApp({
             setup() {
                 const currentView = ref('dashboard')
                 const isSubmitting = ref(false)
                 const isDetailMode = ref(false)
-                const selectedYear = ref(2025) // 預設 2025
+                const selectedYear = ref(2025)
                 const pieType = ref('EXPENSE')
-                const editingId = ref(null) // 編輯狀態
+                const editingId = ref(null)
                 
                 const categories = ref([]); const accounts = ref([])
                 const recentTransactions = ref([]); const detailTransactions = ref([])
@@ -413,10 +419,7 @@ app.get('/', (c) => {
 
                 const form = ref({ date: new Date().toISOString().split('T')[0], account_id: '', type: 'EXPENSE', category_id: '', amount_twd: '', note: '', children: [] })
 
-                watch(() => form.value.children, (newVal) => {
-                    if (isDetailMode.value) form.value.amount_twd = newVal.reduce((acc, curr) => acc + (Number(curr.amount_twd) || 0), 0) || ''
-                }, { deep: true })
-                
+                watch(() => form.value.children, (newVal) => { if (isDetailMode.value) form.value.amount_twd = newVal.reduce((acc, curr) => acc + (Number(curr.amount_twd) || 0), 0) || '' }, { deep: true })
                 watch(isDetailMode, (val) => { if(val && !form.value.children.length) addChild(); if(!val) form.value.children=[] })
                 watch(pieType, () => renderCharts())
 
@@ -445,12 +448,8 @@ app.get('/', (c) => {
                     if(!form.value.account_id && a.length>0 && !editingId.value) form.value.account_id = a[0].id
                 }
 
-                const fetchRecent = async () => {
-                    if(!form.value.account_id) return
-                    const res = await fetch(\`/api/transactions?account_id=\${form.value.account_id}&limit=20\`)
-                    recentTransactions.value = await res.json()
-                }
-
+                const fetchRecent = async () => { if(!form.value.account_id) return; const res = await fetch(\`/api/transactions?account_id=\${form.value.account_id}&limit=20\`); recentTransactions.value = await res.json() }
+                
                 const fetchStats = async () => {
                     const res = await fetch(\`/api/stats?year=\${selectedYear.value}\`)
                     const data = await res.json()
@@ -460,75 +459,51 @@ app.get('/', (c) => {
                     if(currentView.value === 'dashboard') nextTick(renderCharts)
                 }
 
-                const changeView = (v) => { 
-                    currentView.value = v
-                    cancelEdit() // 切換頁面時取消編輯
-                    if(v==='dashboard') fetchStats()
-                    if(v==='accounts') fetchData() 
-                }
+                const changeView = (v) => { currentView.value = v; cancelEdit(); if(v==='dashboard') fetchStats(); if(v==='accounts') fetchData() }
 
                 const openDetail = async (acc) => {
                     currentAccount.value = acc
                     currentView.value = 'account_detail'
-                    const res = await fetch(\`/api/transactions?account_id=\${acc.id}&limit=50\`)
+                    const res = await fetch(\`/api/transactions?account_id=\${acc.id}&limit=100\`)
                     const data = await res.json()
                     let running = acc.balance_twd
-                    detailTransactions.value = data.map((t) => {
+                    
+                    const list = data.map((t) => {
                         const currentBal = running
                         if (t.type === 'INCOME') running -= t.amount_twd
                         else running += t.amount_twd
                         return { ...t, running_balance: currentBal, expanded: false }
                     })
+                    
+                    // 插入初始餘額
+                    const initBal = initialBalances[acc.id] || 0
+                    list.push({ id: 'init', date: '2025-01-01', type: 'BALANCE', amount_twd: null, running_balance: initBal, note: '初始餘額', expanded: false })
+                    
+                    detailTransactions.value = list
                 }
 
-                const deleteTransaction = async (id) => {
-                    if(!confirm('確定刪除？')) return
-                    await fetch(\`/api/transactions/\${id}\`, { method: 'DELETE' })
-                    fetchData(); fetchRecent(); if(currentView.value==='account_detail') openDetail(currentAccount.value)
-                }
+                const deleteTransaction = async (id) => { if(!confirm('確定刪除？')) return; await fetch(\`/api/transactions/\${id}\`, { method: 'DELETE' }); fetchData(); fetchRecent(); if(currentView.value==='account_detail') openDetail(currentAccount.value) }
 
-                // --- 編輯功能 ---
                 const editTransaction = (t) => {
                     editingId.value = t.id
                     isDetailMode.value = t.children && t.children.length > 0
-                    form.value = {
-                        date: t.date,
-                        account_id: t.account_id,
-                        category_id: t.category_id,
-                        type: t.type,
-                        amount_twd: t.amount_twd,
-                        note: t.note,
-                        children: t.children ? JSON.parse(JSON.stringify(t.children)) : []
-                    }
+                    form.value = { date: t.date, account_id: t.account_id, category_id: t.category_id, type: t.type, amount_twd: t.amount_twd, note: t.note, children: t.children ? JSON.parse(JSON.stringify(t.children)) : [] }
                     changeView('add')
                 }
 
-                const cancelEdit = () => {
-                    editingId.value = null
-                    form.value = { date: new Date().toISOString().split('T')[0], account_id: accounts.value[0]?.id, type: 'EXPENSE', category_id: '', amount_twd: '', note: '', children: [] }
-                    isDetailMode.value = false
-                }
+                const cancelEdit = () => { editingId.value = null; form.value = { date: new Date().toISOString().split('T')[0], account_id: accounts.value[0]?.id, type: 'EXPENSE', category_id: '', amount_twd: '', note: '', children: [] }; isDetailMode.value = false }
 
                 const submit = async () => {
                     if(!form.value.account_id || !form.value.amount_twd) return alert('金額未填')
                     isSubmitting.value = true
                     try {
                         const payload = { main: {...form.value}, children: isDetailMode.value ? form.value.children : [] }
-                        let res
-                        if (editingId.value) {
-                            res = await fetch(\`/api/transactions/\${editingId.value}\`, { method: 'PUT', body: JSON.stringify(payload) })
-                        } else {
-                            res = await fetch('/api/transactions', { method: 'POST', body: JSON.stringify(payload) })
-                        }
-                        
-                        if (res.ok) {
-                            alert(editingId.value ? '更新成功' : '記帳成功')
-                            cancelEdit()
-                            fetchRecent(); fetchData()
-                        } else {
-                            alert('錯誤')
-                        }
-                    } catch(e){ console.error(e); alert('錯誤') } finally { isSubmitting.value = false }
+                        const url = editingId.value ? \`/api/transactions/\${editingId.value}\` : '/api/transactions'
+                        const method = editingId.value ? 'PUT' : 'POST'
+                        await fetch(url, { method, body: JSON.stringify(payload) })
+                        alert(editingId.value ? '更新成功' : '記帳成功')
+                        cancelEdit(); fetchRecent(); fetchData()
+                    } catch(e){ alert('錯誤') } finally { isSubmitting.value = false }
                 }
 
                 const renderCharts = () => {
@@ -540,36 +515,15 @@ app.get('/', (c) => {
                     const incomeData = labels.map((_, i) => stats.value.monthly.find(m => m.month.endsWith(\`-\${String(i+1).padStart(2,'0')}\`) && m.type==='INCOME')?.total || 0)
                     const expenseData = labels.map((_, i) => stats.value.monthly.find(m => m.month.endsWith(\`-\${String(i+1).padStart(2,'0')}\`) && m.type==='EXPENSE')?.total || 0)
 
-                    barChartInstance = new Chart(ctxBar, {
-                        type: 'bar',
-                        data: { labels, datasets: [{ label: '收入', data: incomeData, backgroundColor: '#10b981', borderRadius: 4 }, { label: '支出', data: expenseData, backgroundColor: '#f43f5e', borderRadius: 4 }] },
-                        options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, grid: { display: false } }, x: { grid: { display: false } } } }
-                    })
-
+                    barChartInstance = new Chart(ctxBar, { type: 'bar', data: { labels, datasets: [{ label: '收入', data: incomeData, backgroundColor: '#10b981', borderRadius: 4 }, { label: '支出', data: expenseData, backgroundColor: '#f43f5e', borderRadius: 4 }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, grid: { display: false } }, x: { grid: { display: false } } } } })
                     const pieData = stats.value.categories.filter(c => c.type === pieType.value)
                     const otherTotal = pieData.slice(5).reduce((sum, c) => sum + c.total, 0)
                     const finalPieData = pieData.slice(0, 5)
                     if(otherTotal > 0) finalPieData.push({ name: '其他', total: otherTotal })
-
-                    pieChartInstance = new Chart(ctxPie, {
-                        type: 'doughnut',
-                        data: {
-                            labels: finalPieData.map(d => d.name),
-                            datasets: [{ data: finalPieData.map(d => d.total), backgroundColor: ['#3b82f6', '#f59e0b', '#10b981', '#f43f5e', '#8b5cf6', '#cbd5e1'], borderWidth: 0 }]
-                        },
-                        options: { responsive: true, maintainAspectRatio: false, cutout: '70%', plugins: { legend: { position: 'right' } } }
-                    })
+                    pieChartInstance = new Chart(ctxPie, { type: 'doughnut', data: { labels: finalPieData.map(d => d.name), datasets: [{ data: finalPieData.map(d => d.total), backgroundColor: ['#3b82f6', '#f59e0b', '#10b981', '#f43f5e', '#8b5cf6', '#cbd5e1'], borderWidth: 0 }] }, options: { responsive: true, maintainAspectRatio: false, cutout: '70%', plugins: { legend: { position: 'right' } } } })
                 }
-
                 onMounted(() => { fetchData(); fetchStats() })
-
-                return {
-                    currentView, isSubmitting, isDetailMode, selectedYear, pieType, hasPieData, editingId,
-                    categories, accounts, recentTransactions, detailTransactions, currentAccount, stats,
-                    form, currentCurrency, selectedAccountName, filteredCategories, totalNetWorth,
-                    navClass, mobileNavClass, typeName, typeColor, formatCurrency, formatAmount,
-                    addChild, removeChild, changeView, openDetail, fetchRecent, submit, deleteTransaction, fetchStats, editTransaction, cancelEdit
-                }
+                return { currentView, isSubmitting, isDetailMode, selectedYear, pieType, hasPieData, editingId, categories, accounts, recentTransactions, detailTransactions, currentAccount, stats, form, currentCurrency, selectedAccountName, filteredCategories, totalNetWorth, navClass, mobileNavClass, typeName, typeColor, formatCurrency, formatAmount, addChild, removeChild, changeView, openDetail, fetchRecent, submit, deleteTransaction, fetchStats, editTransaction, cancelEdit }
             }
         }).mount('#app')
       </script>
