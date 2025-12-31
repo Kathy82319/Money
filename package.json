@@ -1,0 +1,15 @@
+{
+  "name": "my-money-tracker",
+  "scripts": {
+    "dev": "wrangler pages dev",
+    "deploy": "wrangler pages deploy",
+    "build": "wrangler pages functions build --outdir=dist"
+  },
+  "dependencies": {
+    "hono": "^4.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240208.0",
+    "wrangler": "^3.0.0"
+  }
+}
