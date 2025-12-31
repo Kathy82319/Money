@@ -1,2 +1,6 @@
 name = "my-money-tracker"
 pages_build_output_dir = "dist"  
+
+binding = "DB"
+database_name = "money-db"
+database_id = "144ecd77-e617-4ebc-94c9-66e179c2d693"
