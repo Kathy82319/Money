@@ -58,7 +58,7 @@ app.get('/api/transactions', async (c) => {
 app.get('/api/stats', async (c) => {
     const year = c.req.query('year') || '2025'
     
-    // 排除 '借入/負債' 和 '帳戶間移轉'，避免這些非實質收支影響圖表
+    // 排除 '借入/負債' 和 '帳戶間移轉'
     const excludeFilter = `AND c.name NOT IN ('借入/負債', '帳戶間移轉', '帳戶間移轉')`
 
     const { results: totals } = await c.env.DB.prepare(`
@@ -317,8 +317,8 @@ app.get('/', (c) => {
                                         <td class="p-3 text-slate-500 font-mono">{{ t.date }}</td>
                                         <td class="p-3 font-bold text-slate-700">{{ t.category_name }}</td>
                                         <td class="p-3 text-slate-500">{{ t.note }}</td>
-                                        <td :class="['p-3 text-right font-mono font-bold', t.type==='INCOME'?'text-emerald-600':'text-rose-600']">{{ t.type==='EXPENSE'?'-':'+' }}{{ formatAmount(t) }}</td>
-                                        <td class="p-3 text-center space-x-2">
+                                        <td :class="['p-3 text-right font-mono font-bold', getAmountClass(t)]">{{ t.type==='EXPENSE'?'-':'+' }}{{ formatAmount(t) }}</td>
+                                        <td class="p-3 text-center flex justify-center items-center gap-4">
                                             <button @click="editTransaction(t)" class="text-slate-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-pen"></i></button>
                                             <button @click="deleteTransaction(t.id)" class="text-slate-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-trash-can"></i></button>
                                         </td>
@@ -366,12 +366,12 @@ app.get('/', (c) => {
                                                 <div :class="t.type==='BALANCE'?'':'font-bold text-slate-700'">{{ t.children?.length ? t.note || '多筆交易' : (t.type==='BALANCE' ? '初始餘額' : t.category_name) }}</div>
                                                 <div class="text-xs text-slate-400" v-if="t.children?.length">{{ t.children.length }} 筆明細</div>
                                             </td>
-                                            <td :class="['p-4 text-right font-mono font-bold', t.type==='INCOME'?'text-emerald-600':(t.type==='EXPENSE'?'text-rose-600':'')]">
+                                            <td :class="['p-4 text-right font-mono font-bold', getAmountClass(t)]">
                                                 {{ t.type==='EXPENSE'?'-':(t.type==='INCOME'?'+':'') }}{{ t.amount_twd ? formatCurrency(t.amount_twd, currentAccount?.currency) : '-' }}
                                             </td>
                                             <td class="p-4 text-right font-mono text-slate-500">{{ formatCurrency(t.running_balance, currentAccount?.currency) }}</td>
-                                            <td class="p-4 text-center space-x-2" @click.stop>
-                                                <div v-if="t.type!=='BALANCE'">
+                                            <td class="p-4 text-center flex justify-center items-center gap-4" @click.stop>
+                                                <div v-if="t.type!=='BALANCE'" class="flex gap-4">
                                                     <button @click="editTransaction(t)" class="text-slate-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-pen"></i></button>
                                                     <button @click="deleteTransaction(t.id)" class="text-slate-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-trash-can"></i></button>
                                                 </div>
@@ -400,7 +400,6 @@ app.get('/', (c) => {
         const { createApp, ref, computed, onMounted, watch, nextTick } = Vue
         let barChartInstance = null, pieChartInstance = null
         
-        // 初始餘額設定
         const initialBalances = { 1: 170687, 2: 66892, 3: 0, 4: 84565, 5: 620623, 6: 35030, 7: 52917, 8: 0, 9: 887203 }
 
         createApp({
@@ -439,6 +438,14 @@ app.get('/', (c) => {
                 const navClass = (v) => ['w-full text-left px-4 py-2.5 rounded-lg flex items-center gap-3 transition font-medium', currentView.value===v ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:bg-slate-800 hover:text-white']
                 const mobileNavClass = (v) => ['px-4 py-2 rounded-md text-xl transition', currentView.value===v ? 'bg-white shadow text-emerald-600' : 'text-slate-400']
 
+                const getAmountClass = (t) => {
+                    if (t.type === 'BALANCE') return ''
+                    // 轉帳/借貸：轉入(INCOME)淡綠，轉出(EXPENSE/TRANSFER)淡紅
+                    const isTransfer = t.category_name === '帳戶間移轉' || t.category_name === '借入/負債'
+                    if (t.type === 'INCOME') return isTransfer ? 'text-emerald-400' : 'text-emerald-600'
+                    return isTransfer ? 'text-rose-400' : 'text-rose-600'
+                }
+
                 const addChild = () => form.value.children.push({ category_id: '', amount_twd: '', note: '' })
                 const removeChild = (idx) => form.value.children.splice(idx, 1)
 
@@ -459,7 +466,12 @@ app.get('/', (c) => {
                     if(currentView.value === 'dashboard') nextTick(renderCharts)
                 }
 
-                const changeView = (v) => { currentView.value = v; cancelEdit(); if(v==='dashboard') fetchStats(); if(v==='accounts') fetchData() }
+                const changeView = (v, reset = true) => { 
+                    currentView.value = v
+                    if (reset) cancelEdit() 
+                    if(v==='dashboard') fetchStats()
+                    if(v==='accounts') fetchData() 
+                }
 
                 const openDetail = async (acc) => {
                     currentAccount.value = acc
@@ -475,7 +487,6 @@ app.get('/', (c) => {
                         return { ...t, running_balance: currentBal, expanded: false }
                     })
                     
-                    // 插入初始餘額
                     const initBal = initialBalances[acc.id] || 0
                     list.push({ id: 'init', date: '2025-01-01', type: 'BALANCE', amount_twd: null, running_balance: initBal, note: '初始餘額', expanded: false })
                     
@@ -488,7 +499,7 @@ app.get('/', (c) => {
                     editingId.value = t.id
                     isDetailMode.value = t.children && t.children.length > 0
                     form.value = { date: t.date, account_id: t.account_id, category_id: t.category_id, type: t.type, amount_twd: t.amount_twd, note: t.note, children: t.children ? JSON.parse(JSON.stringify(t.children)) : [] }
-                    changeView('add')
+                    changeView('add', false) // false = 不要清空表單
                 }
 
                 const cancelEdit = () => { editingId.value = null; form.value = { date: new Date().toISOString().split('T')[0], account_id: accounts.value[0]?.id, type: 'EXPENSE', category_id: '', amount_twd: '', note: '', children: [] }; isDetailMode.value = false }
@@ -523,7 +534,7 @@ app.get('/', (c) => {
                     pieChartInstance = new Chart(ctxPie, { type: 'doughnut', data: { labels: finalPieData.map(d => d.name), datasets: [{ data: finalPieData.map(d => d.total), backgroundColor: ['#3b82f6', '#f59e0b', '#10b981', '#f43f5e', '#8b5cf6', '#cbd5e1'], borderWidth: 0 }] }, options: { responsive: true, maintainAspectRatio: false, cutout: '70%', plugins: { legend: { position: 'right' } } } })
                 }
                 onMounted(() => { fetchData(); fetchStats() })
-                return { currentView, isSubmitting, isDetailMode, selectedYear, pieType, hasPieData, editingId, categories, accounts, recentTransactions, detailTransactions, currentAccount, stats, form, currentCurrency, selectedAccountName, filteredCategories, totalNetWorth, navClass, mobileNavClass, typeName, typeColor, formatCurrency, formatAmount, addChild, removeChild, changeView, openDetail, fetchRecent, submit, deleteTransaction, fetchStats, editTransaction, cancelEdit }
+                return { currentView, isSubmitting, isDetailMode, selectedYear, pieType, hasPieData, editingId, categories, accounts, recentTransactions, detailTransactions, currentAccount, stats, form, currentCurrency, selectedAccountName, filteredCategories, totalNetWorth, navClass, mobileNavClass, typeName, typeColor, formatCurrency, formatAmount, addChild, removeChild, changeView, openDetail, fetchRecent, submit, deleteTransaction, fetchStats, editTransaction, cancelEdit, getAmountClass }
             }
         }).mount('#app')
       </script>
