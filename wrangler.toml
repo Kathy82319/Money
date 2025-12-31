@@ -1,2 +1,2 @@
 name = "my-money-tracker"
-pages_build_output_dir = "dist"
+pages_build_output_dir = "dist" 
