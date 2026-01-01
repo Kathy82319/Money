@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import notes from './notes' // 引入剛剛建立的 notes.ts
 
 type Bindings = {
   DB: D1Database
@@ -7,10 +8,16 @@ type Bindings = {
 const app = new Hono<{ Bindings: Bindings }>()
 
 // ==========================================
-// [BACKEND] API 區域
+// [BACKEND] API 路由掛載
 // ==========================================
 
-// 1. 分類 API
+// 掛載筆記 API (所有 /api/notes 開頭的請求都會交給 notes.ts 處理)
+app.route('/api/notes', notes)
+
+// ==========================================
+// [BACKEND] 原有的記帳 API (保持不變)
+// ==========================================
+
 app.get('/api/categories', async (c) => {
   const { results } = await c.env.DB.prepare('SELECT * FROM categories ORDER BY type, id').all()
   return c.json(results)
@@ -34,13 +41,11 @@ app.delete('/api/categories/:id', async (c) => {
     } catch(e: any) { return c.json({error: e.message}, 500) }
 })
 
-// 2. 帳戶 API
 app.get('/api/accounts', async (c) => {
   const { results } = await c.env.DB.prepare('SELECT * FROM accounts ORDER BY type, id').all()
   return c.json(results)
 })
 
-// 3. 交易 API
 app.get('/api/transactions', async (c) => {
   const accountId = c.req.query('account_id')
   const limit = c.req.query('limit') || '50'
@@ -76,7 +81,6 @@ app.get('/api/transactions', async (c) => {
   return c.json(transactionsWithChildren)
 })
 
-// 4. 統計 API
 app.get('/api/stats', async (c) => {
     const start = c.req.query('start')
     const end = c.req.query('end')
@@ -123,7 +127,26 @@ app.get('/api/stats', async (c) => {
         ORDER BY total DESC
     `).bind(...params).all()
 
-    return c.json({ totals, monthly, categories })
+    const { results: rawNotes } = await c.env.DB.prepare(`
+        SELECT t.note, t.amount_twd
+        FROM transactions t
+        LEFT JOIN categories c ON t.category_id = c.id
+        WHERE t.note IS NOT NULL AND t.note != '' ${excludeFilter} ${filters}
+    `).bind(...params).all()
+
+    const keywordMap = new Map<string, number>()
+    rawNotes.forEach((row: any) => {
+        let key = row.note.replace(/[\[\]]/g, '').trim()
+        if (!key || /^\d+$/.test(key)) return
+        keywordMap.set(key, (keywordMap.get(key) || 0) + (row.amount_twd || 0))
+    })
+
+    const keywords = Array.from(keywordMap.entries())
+        .map(([name, total]) => ({ name, total }))
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 15)
+
+    return c.json({ totals, monthly, categories, keywords })
 })
 
 app.delete('/api/transactions/:id', async (c) => {
@@ -183,7 +206,7 @@ app.post('/api/transactions', async (c) => {
 })
 
 // ==========================================
-// [FRONTEND] Vue + Tailwind + Chart.js + DataLabels
+// [FRONTEND]
 // ==========================================
 
 app.get('/', (c) => {
@@ -210,6 +233,10 @@ app.get('/', (c) => {
         .fade-enter-from, .fade-leave-to { opacity: 0; }
         .modal-enter-active, .modal-leave-active { transition: all 0.2s ease; }
         .modal-enter-from, .modal-leave-to { opacity: 0; transform: scale(0.95); }
+        
+        /* 筆記本專用樣式 */
+        .note-active { border-left: 4px solid #0f172a; background-color: #f1f5f9; }
+        textarea:focus { outline: none; }
       </style>
     </head>
     <body class="bg-slate-50 text-slate-800 h-screen overflow-hidden flex">
@@ -224,6 +251,7 @@ app.get('/', (c) => {
           <nav class="p-4 space-y-2 flex-1 overflow-y-auto scroller">
              <button @click="changeView('dashboard')" :class="navClass('dashboard')"><i class="fa-solid fa-chart-pie w-5"></i> 總覽</button>
              <button @click="changeView('add')" :class="navClass('add')"><i class="fa-solid fa-circle-plus w-5"></i> 新增記帳</button>
+             <button @click="changeView('notes')" :class="navClass('notes')"><i class="fa-solid fa-book w-5"></i> 記事本</button>
              
              <div class="pt-4 pb-2 px-4 flex justify-between items-center text-xs font-bold text-slate-500 uppercase">
                 <span>銀行帳戶</span>
@@ -247,12 +275,76 @@ app.get('/', (c) => {
                 <div class="flex bg-slate-100 rounded-lg p-1">
                     <button @click="changeView('dashboard')" :class="mobileNavClass('dashboard')"><i class="fa-solid fa-chart-pie"></i></button>
                     <button @click="changeView('add')" :class="mobileNavClass('add')"><i class="fa-solid fa-plus"></i></button>
+                    <button @click="changeView('notes')" :class="mobileNavClass('notes')"><i class="fa-solid fa-book"></i></button>
                     <button @click="changeView('accounts')" :class="mobileNavClass('accounts')"><i class="fa-solid fa-building-columns"></i></button>
                 </div>
             </header>
 
-            <div class="flex-1 overflow-y-auto bg-slate-50 p-4 md:p-8 scroller">
+            <div class="flex-1 overflow-y-auto bg-slate-50 p-4 md:p-8 scroller relative">
                 
+                <div v-if="currentView === 'notes'" class="absolute inset-0 flex bg-white md:rounded-2xl md:m-6 md:shadow-xl md:border border-slate-200 overflow-hidden">
+                    
+                    <div :class="['flex-col border-r border-slate-100 bg-white h-full z-10 transition-transform duration-300 absolute md:relative w-full md:w-80', (isMobile && currentNote) ? '-translate-x-full' : 'translate-x-0', 'md:flex md:translate-x-0']">
+                        <div class="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                            <h2 class="font-bold text-lg text-slate-700">筆記列表</h2>
+                            <button @click="createNewNote" class="bg-slate-900 text-white px-3 py-1.5 rounded-lg text-sm font-bold shadow hover:bg-slate-700"><i class="fa-solid fa-plus"></i> 新增</button>
+                        </div>
+                        <div class="flex-1 overflow-y-auto scroller">
+                            <div v-for="note in notesList" :key="note.id" @click="selectNote(note)" 
+                                :class="['p-4 border-b border-slate-50 cursor-pointer hover:bg-slate-50 transition group relative', currentNote?.id === note.id ? 'note-active' : '']">
+                                <div class="flex gap-4">
+                                    <div class="flex flex-col items-center justify-center bg-slate-100 rounded-lg w-14 h-14 shrink-0 text-slate-600">
+                                        <div class="text-xl font-bold leading-none">{{ getDay(note.date) }}</div>
+                                        <div class="text-[10px] uppercase font-bold text-slate-400">{{ getMonth(note.date) }}</div>
+                                    </div>
+                                    <div class="overflow-hidden">
+                                        <div class="font-bold text-slate-800 truncate mb-1">{{ note.title || '無標題' }}</div>
+                                        <div class="text-xs text-slate-400 truncate">{{ note.content }}</div>
+                                        <div class="mt-2 flex items-center gap-2">
+                                            <span :class="['w-2 h-2 rounded-full', getTagColor(note.tag)]"></span>
+                                            <span class="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">{{ getTagName(note.tag) }}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div :class="['flex-1 flex flex-col bg-slate-50 h-full w-full absolute md:relative transition-transform duration-300', (isMobile && !currentNote) ? 'translate-x-full' : 'translate-x-0', 'md:translate-x-0']">
+                        <div v-if="!currentNote" class="flex-1 flex flex-col items-center justify-center text-slate-300">
+                            <i class="fa-solid fa-book-open text-6xl mb-4"></i>
+                            <p>選擇一則筆記開始閱讀</p>
+                        </div>
+                        <div v-else class="flex flex-col h-full">
+                            <div class="p-4 border-b border-slate-200 bg-white flex justify-between items-center shrink-0">
+                                <div class="flex items-center gap-3">
+                                    <button @click="currentNote=null" class="md:hidden text-slate-500 hover:text-slate-800"><i class="fa-solid fa-arrow-left text-xl"></i></button>
+                                    <input type="date" v-model="currentNote.date" class="bg-slate-100 border-none rounded px-2 py-1 text-sm font-mono text-slate-600 outline-none">
+                                </div>
+                                <div class="flex gap-2">
+                                    <button @click="deleteNote" class="text-slate-400 hover:text-rose-500 px-3"><i class="fa-solid fa-trash-can"></i></button>
+                                    <button @click="saveNote" class="bg-emerald-600 text-white px-4 py-1.5 rounded-lg text-sm font-bold shadow hover:bg-emerald-700">儲存</button>
+                                </div>
+                            </div>
+                            
+                            <div class="flex-1 overflow-y-auto p-6 md:p-10">
+                                <div class="max-w-3xl mx-auto h-full flex flex-col">
+                                    <input v-model="currentNote.title" type="text" placeholder="輸入標題..." lang="zh-TW" class="text-3xl font-bold text-slate-800 bg-transparent outline-none placeholder:text-slate-300 mb-4 w-full">
+                                    
+                                    <div class="flex gap-2 mb-6">
+                                        <button v-for="tag in ['general','diary','todo','idea']" :key="tag" @click="currentNote.tag=tag"
+                                            :class="['px-3 py-1 rounded-full text-xs font-bold transition border', currentNote.tag===tag ? getTagActiveColor(tag) : 'bg-white text-slate-400 border-slate-200 hover:border-slate-300']">
+                                            {{ getTagName(tag) }}
+                                        </button>
+                                    </div>
+
+                                    <textarea v-model="currentNote.content" placeholder="寫點什麼..." lang="zh-TW" inputmode="text" class="flex-1 w-full bg-transparent resize-none text-slate-600 leading-relaxed text-lg placeholder:text-slate-300"></textarea>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <div v-if="currentView === 'dashboard'" class="max-w-6xl mx-auto space-y-6">
                     
                     <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200">
@@ -308,17 +400,30 @@ app.get('/', (c) => {
                         <div class="h-64 md:h-80"><canvas id="barChart"></canvas></div>
                     </div>
 
-                    <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[500px]">
-                        <div class="flex justify-between items-center mb-4">
-                            <h3 class="font-bold text-slate-700">分類佔比分析</h3>
-                            <div class="flex bg-slate-100 rounded p-0.5">
-                                <button @click="pieType='EXPENSE'" :class="['text-xs px-3 py-1.5 rounded transition font-bold', pieType==='EXPENSE'?'bg-white shadow text-rose-500':'text-slate-400']">支出</button>
-                                <button @click="pieType='INCOME'" :class="['text-xs px-3 py-1.5 rounded transition font-bold', pieType==='INCOME'?'bg-white shadow text-emerald-500':'text-slate-400']">收入</button>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[500px]">
+                            <div class="flex justify-between items-center mb-4">
+                                <h3 class="font-bold text-slate-700">分類佔比分析</h3>
+                                <div class="flex bg-slate-100 rounded p-0.5">
+                                    <button @click="pieType='EXPENSE'" :class="['text-xs px-3 py-1.5 rounded transition font-bold', pieType==='EXPENSE'?'bg-white shadow text-rose-500':'text-slate-400']">支出</button>
+                                    <button @click="pieType='INCOME'" :class="['text-xs px-3 py-1.5 rounded transition font-bold', pieType==='INCOME'?'bg-white shadow text-emerald-500':'text-slate-400']">收入</button>
+                                </div>
+                            </div>
+                            <div class="flex-1 relative">
+                                <canvas id="pieChart"></canvas>
+                                <div v-if="!hasPieData" class="absolute inset-0 flex items-center justify-center text-slate-300 text-sm">無數據</div>
                             </div>
                         </div>
-                        <div class="flex-1 relative">
-                            <canvas id="pieChart"></canvas>
-                            <div v-if="!hasPieData" class="absolute inset-0 flex items-center justify-center text-slate-300 text-sm">無數據</div>
+
+                        <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[500px]">
+                            <div class="flex justify-between items-center mb-4">
+                                <h3 class="font-bold text-slate-700">常出現的關鍵字 (Top 15)</h3>
+                                <div class="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded">總金額</div>
+                            </div>
+                            <div class="flex-1 relative overflow-hidden">
+                                <canvas id="keywordChart"></canvas>
+                                <div v-if="stats.keywords.length===0" class="absolute inset-0 flex items-center justify-center text-slate-300 text-sm">無數據</div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -539,10 +644,8 @@ app.get('/', (c) => {
         const { createApp, ref, computed, onMounted, watch, nextTick } = Vue
         Chart.register(ChartDataLabels);
 
-        let barChartInstance = null, pieChartInstance = null
+        let barChartInstance = null, pieChartInstance = null, keywordChartInstance = null
         
-        // 初始餘額設定
-        // 更新台新 Richart (ID:6) 為 35030
         const initialBalances = { 1: 170687, 2: 66892, 3: 0, 4: 84565, 5: 620623, 6: 35030, 7: 52917, 8: 0, 9: 887203 }
 
         createApp({
@@ -552,9 +655,9 @@ app.get('/', (c) => {
                 const isDetailMode = ref(false)
                 const dateRange = ref({ start: '', end: '' })
                 const pieType = ref('EXPENSE')
-                const showDataLabels = ref(true) // 控制數值顯示
+                const showDataLabels = ref(true)
+                const isMobile = ref(window.innerWidth < 768)
                 
-                // Modals & Filters
                 const showEditModal = ref(false)
                 const showCategoryModal = ref(false)
                 const editingId = ref(null)
@@ -566,7 +669,11 @@ app.get('/', (c) => {
                 const categories = ref([]); const accounts = ref([])
                 const recentTransactions = ref([]); const detailTransactions = ref([])
                 const currentAccount = ref(null)
-                const stats = ref({ income: 0, expense: 0, monthly: [], categories: [] })
+                const stats = ref({ income: 0, expense: 0, monthly: [], categories: [], keywords: [] })
+                
+                // Notes Data
+                const notesList = ref([])
+                const currentNote = ref(null)
 
                 const form = ref({ date: new Date().toISOString().split('T')[0], account_id: '', type: 'EXPENSE', category_id: '', amount_twd: '', note: '', children: [] })
                 const editForm = ref({ date: '', account_id: '', type: 'EXPENSE', category_id: '', amount_twd: '', note: '', children: [] })
@@ -576,12 +683,11 @@ app.get('/', (c) => {
                 watch(isDetailMode, (val) => { if(val && !form.value.children.length) addChild(); if(!val) form.value.children=[] })
                 watch(() => editForm.value.children, (newVal) => { if (isEditDetailMode.value) editForm.value.amount_twd = newVal.reduce((acc, curr) => acc + (Number(curr.amount_twd) || 0), 0) || '' }, { deep: true })
                 watch(isEditDetailMode, (val) => { if(val && !editForm.value.children?.length) addEditChild(); if(!val) editForm.value.children=[] })
-                watch([pieType, showDataLabels], () => renderCharts()) // 當標籤開關變動時重繪
+                watch([pieType, showDataLabels], () => renderCharts())
+                watch(selectedBanks, (val) => { localStorage.setItem('selectedBanks', JSON.stringify(val)) }, { deep: true })
                 
-                // localStorage for Banks
-                watch(selectedBanks, (val) => {
-                    localStorage.setItem('selectedBanks', JSON.stringify(val))
-                }, { deep: true })
+                // Resize Listener
+                window.addEventListener('resize', () => { isMobile.value = window.innerWidth < 768 })
 
                 const currentCurrency = computed(() => accounts.value.find(a => a.id === form.value.account_id)?.currency || 'TWD')
                 const selectedAccountName = computed(() => accounts.value.find(a => a.id === form.value.account_id)?.name)
@@ -627,11 +733,8 @@ app.get('/', (c) => {
                     categories.value = c; accounts.value = a
                     
                     const saved = localStorage.getItem('selectedBanks')
-                    if (saved) {
-                        selectedBanks.value = JSON.parse(saved)
-                    } else {
-                        selectedBanks.value = a.map(acc => acc.id) 
-                    }
+                    if (saved) { selectedBanks.value = JSON.parse(saved) } 
+                    else { selectedBanks.value = a.map(acc => acc.id) }
                     
                     if(!form.value.account_id && a.length>0) form.value.account_id = a[0].id
                 }
@@ -644,9 +747,49 @@ app.get('/', (c) => {
                     const data = await res.json()
                     stats.value.income = data.totals.find(t=>t.type==='INCOME')?.total || 0
                     stats.value.expense = data.totals.find(t=>t.type==='EXPENSE')?.total || 0
-                    stats.value.monthly = data.monthly; stats.value.categories = data.categories
+                    stats.value.monthly = data.monthly; stats.value.categories = data.categories; stats.value.keywords = data.keywords
                     if(currentView.value === 'dashboard') nextTick(renderCharts)
                 }
+
+                // --- Notes Logic ---
+                const fetchNotes = async () => {
+                    const res = await fetch('/api/notes')
+                    notesList.value = await res.json()
+                }
+                
+                const createNewNote = () => {
+                    currentNote.value = { date: new Date().toISOString().split('T')[0], title: '', content: '', tag: 'general', id: null } // id null means new
+                }
+
+                const selectNote = (note) => {
+                    currentNote.value = { ...note } // Clone to avoid direct mutation before save
+                }
+
+                const saveNote = async () => {
+                    if (!currentNote.value) return
+                    const method = currentNote.value.id ? 'PUT' : 'POST'
+                    const url = currentNote.value.id ? \`/api/notes/\${currentNote.value.id}\` : '/api/notes'
+                    await fetch(url, { method, body: JSON.stringify(currentNote.value) })
+                    await fetchNotes() // Refresh list
+                    // If it was new, select the newly created one (simplified: just select the first one which is latest)
+                    if (!currentNote.value.id) selectNote(notesList.value[0]) 
+                    alert('儲存成功')
+                }
+
+                const deleteNote = async () => {
+                    if (!confirm('確定刪除此筆記？')) return
+                    if (currentNote.value.id) {
+                        await fetch(\`/api/notes/\${currentNote.value.id}\`, { method: 'DELETE' })
+                    }
+                    currentNote.value = null
+                    await fetchNotes()
+                }
+
+                const getDay = (d) => d.split('-')[2]
+                const getMonth = (d) => new Date(d).toLocaleString('en-US', { month: 'short' })
+                const getTagColor = (tag) => ({'general':'bg-slate-400','diary':'bg-blue-500','todo':'bg-rose-500','idea':'bg-amber-500'}[tag] || 'bg-slate-400')
+                const getTagActiveColor = (tag) => ({'general':'bg-slate-100 text-slate-600 border-slate-300','diary':'bg-blue-100 text-blue-600 border-blue-300','todo':'bg-rose-100 text-rose-600 border-rose-300','idea':'bg-amber-100 text-amber-600 border-amber-300'}[tag])
+                const getTagName = (tag) => ({'general':'一般','diary':'日記','todo':'待辦','idea':'靈感'}[tag] || tag)
 
                 const toggleBank = (id) => {
                     if (id === 'all') selectedBanks.value = accounts.value.map(a => a.id)
@@ -658,7 +801,13 @@ app.get('/', (c) => {
                 }
 
                 const resetDateRange = () => { dateRange.value = { start: '', end: '' }; fetchStats() }
-                const changeView = (v, reset = true) => { currentView.value = v; if (reset) cancelEdit(); if(v==='dashboard') fetchStats(); if(v==='accounts') fetchData() }
+                const changeView = (v, reset = true) => { 
+                    currentView.value = v
+                    if (reset) cancelEdit() 
+                    if(v==='dashboard') fetchStats()
+                    if(v==='accounts') fetchData() 
+                    if(v==='notes') fetchNotes()
+                }
 
                 const openDetail = async (acc) => {
                     currentAccount.value = acc
@@ -715,9 +864,9 @@ app.get('/', (c) => {
                 }
 
                 const renderCharts = () => {
-                    const ctxBar = document.getElementById('barChart'); const ctxPie = document.getElementById('pieChart')
-                    if(!ctxBar || !ctxPie) return
-                    if(barChartInstance) barChartInstance.destroy(); if(pieChartInstance) pieChartInstance.destroy()
+                    const ctxBar = document.getElementById('barChart'); const ctxPie = document.getElementById('pieChart'); const ctxKeyword = document.getElementById('keywordChart')
+                    if(!ctxBar || !ctxPie || !ctxKeyword) return
+                    if(barChartInstance) barChartInstance.destroy(); if(pieChartInstance) pieChartInstance.destroy(); if(keywordChartInstance) keywordChartInstance.destroy()
 
                     const labels = Array.from({length:12}, (_,i) => \`\${i+1}月\`)
                     const incomeData = labels.map((_, i) => stats.value.monthly.find(m => m.month.endsWith(\`-\${String(i+1).padStart(2,'0')}\`) && m.type==='INCOME')?.total || 0)
@@ -749,17 +898,50 @@ app.get('/', (c) => {
                         type: 'doughnut',
                         data: { labels: finalPieData.map(d => d.name), datasets: [{ data: finalPieData.map(d => d.total), backgroundColor: ['#3b82f6', '#f59e0b', '#10b981', '#f43f5e', '#8b5cf6', '#cbd5e1'], borderWidth: 0 }] },
                         options: { 
-                            responsive: true, maintainAspectRatio: false, cutout: '60%', 
+                            responsive: true, maintainAspectRatio: false, cutout: '50%', 
+                            layout: { padding: 40 },
                             plugins: { 
-                                legend: { position: 'right' },
+                                legend: { display: false }, 
                                 datalabels: { 
-                                    display: true, // 圓餅圖總是顯示
-                                    color: '#fff', font: { weight: 'bold' }, formatter: (val, ctx) => {
-                                    let sum = 0; let dataArr = ctx.chart.data.datasets[0].data;
-                                    dataArr.map(data => { sum += data; });
-                                    return val > 0 ? val.toLocaleString() : '';
-                                } }
+                                    display: true,
+                                    anchor: 'end', align: 'end', offset: 10,
+                                    color: '#334155', font: { weight: 'bold', size: 12 }, 
+                                    formatter: (val, ctx) => {
+                                        return ctx.chart.data.labels[ctx.dataIndex] + '\\n$' + val.toLocaleString()
+                                    } 
+                                }
                             } 
+                        }
+                    })
+
+                    const kwLabels = stats.value.keywords.map(k => k.name)
+                    const kwData = stats.value.keywords.map(k => k.total)
+                    
+                    keywordChartInstance = new Chart(ctxKeyword, {
+                        type: 'bar',
+                        data: {
+                            labels: kwLabels,
+                            datasets: [{
+                                label: '金額',
+                                data: kwData,
+                                backgroundColor: '#6366f1',
+                                borderRadius: 4,
+                                barThickness: 15
+                            }]
+                        },
+                        options: {
+                            indexAxis: 'y',
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            scales: { x: { display: false }, y: { grid: { display: false } } },
+                            plugins: {
+                                legend: { display: false },
+                                datalabels: {
+                                    anchor: 'end', align: 'end',
+                                    color: '#6366f1', font: { weight: 'bold' },
+                                    formatter: (val) => '$' + val.toLocaleString()
+                                }
+                            }
                         }
                     })
                 }
@@ -772,9 +954,10 @@ app.get('/', (c) => {
                     categories, accounts, recentTransactions, detailTransactions, currentAccount, stats, form, 
                     currentCurrency, selectedAccountName, filteredCategories, editFilteredCategories, totalNetWorth, 
                     navClass, mobileNavClass, typeName, typeColor, formatCurrency, formatAmount, getAmountClass,
-                    addChild, removeChild, addEditChild, removeEditChild, showDataLabels,
+                    addChild, removeChild, addEditChild, removeEditChild, showDataLabels, isMobile,
                     changeView, openDetail, fetchRecent, submit, submitEdit, deleteTransaction, fetchStats, resetDateRange, toggleBank,
-                    openEditModal, addCategory, deleteCategory
+                    openEditModal, addCategory, deleteCategory,
+                    notesList, currentNote, fetchNotes, createNewNote, selectNote, saveNote, deleteNote, getDay, getMonth, getTagColor, getTagActiveColor, getTagName
                 }
             }
         }).mount('#app')
