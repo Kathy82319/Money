@@ -537,8 +537,8 @@ app.get('/', (c) => {
         let barChartInstance = null, pieChartInstance = null
         
         // 初始餘額設定
-        // 更新台新 Richart (ID:6) 為 73915
-        const initialBalances = { 1: 170687, 2: 66892, 3: 0, 4: 84565, 5: 620623, 6: 73915, 7: 52917, 8: 0, 9: 887203 }
+        // 更新台新 Richart (ID:6) 為 73927
+        const initialBalances = { 1: 170687, 2: 66892, 3: 0, 4: 84565, 5: 620623, 6: 73927, 7: 52917, 8: 0, 9: 887203 }
 
         createApp({
             setup() {
