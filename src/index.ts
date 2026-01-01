@@ -10,16 +10,38 @@ const app = new Hono<{ Bindings: Bindings }>()
 // [BACKEND] API 區域
 // ==========================================
 
+// 1. 分類 API (新增 DELETE 與 POST)
 app.get('/api/categories', async (c) => {
   const { results } = await c.env.DB.prepare('SELECT * FROM categories ORDER BY type, id').all()
   return c.json(results)
 })
 
+app.post('/api/categories', async (c) => {
+    try {
+        const { name, type } = await c.req.json()
+        if(!name || !type) return c.json({error: '缺少欄位'}, 400)
+        // 取得目前最大ID並+1 (簡單實作)
+        const maxId = await c.env.DB.prepare('SELECT MAX(id) as maxId FROM categories').first('maxId') as number
+        const newId = (maxId || 0) + 1
+        await c.env.DB.prepare('INSERT INTO categories (id, name, type) VALUES (?, ?, ?)').bind(newId, name, type).run()
+        return c.json({success: true})
+    } catch(e: any) { return c.json({error: e.message}, 500) }
+})
+
+app.delete('/api/categories/:id', async (c) => {
+    try {
+        await c.env.DB.prepare('DELETE FROM categories WHERE id = ?').bind(c.req.param('id')).run()
+        return c.json({success: true})
+    } catch(e: any) { return c.json({error: e.message}, 500) }
+})
+
+// 2. 帳戶 API
 app.get('/api/accounts', async (c) => {
   const { results } = await c.env.DB.prepare('SELECT * FROM accounts ORDER BY type, id').all()
   return c.json(results)
 })
 
+// 3. 交易 API
 app.get('/api/transactions', async (c) => {
   const accountId = c.req.query('account_id')
   const limit = c.req.query('limit') || '50'
@@ -55,37 +77,53 @@ app.get('/api/transactions', async (c) => {
   return c.json(transactionsWithChildren)
 })
 
+// 4. 統計 API (支援動態日期區間)
 app.get('/api/stats', async (c) => {
-    const year = c.req.query('year') || '2025'
+    const start = c.req.query('start') // YYYY-MM-DD
+    const end = c.req.query('end')     // YYYY-MM-DD
     
-    // 排除 '借入/負債' 和 '帳戶間移轉'
+    let dateFilter = ''
+    const params: any[] = []
+
+    if (start) {
+        dateFilter += ` AND t.date >= ? `
+        params.push(start)
+    }
+    if (end) {
+        dateFilter += ` AND t.date <= ? `
+        params.push(end)
+    }
+    
     const excludeFilter = `AND c.name NOT IN ('借入/負債', '帳戶間移轉')`
 
+    // A. 總收支
     const { results: totals } = await c.env.DB.prepare(`
         SELECT t.type, SUM(t.amount_twd) as total 
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
-        WHERE strftime('%Y', t.date) = ? AND t.parent_id IS NULL ${excludeFilter}
+        WHERE t.parent_id IS NULL ${excludeFilter} ${dateFilter}
         GROUP BY t.type
-    `).bind(year).all()
+    `).bind(...params).all()
 
+    // B. 每月趨勢
     const { results: monthly } = await c.env.DB.prepare(`
         SELECT strftime('%Y-%m', t.date) as month, t.type, SUM(t.amount_twd) as total 
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
-        WHERE strftime('%Y', t.date) = ? AND t.parent_id IS NULL ${excludeFilter}
+        WHERE t.parent_id IS NULL ${excludeFilter} ${dateFilter}
         GROUP BY month, t.type
         ORDER BY month
-    `).bind(year).all()
+    `).bind(...params).all()
 
+    // C. 分類佔比
     const { results: categories } = await c.env.DB.prepare(`
         SELECT c.name, t.type, SUM(t.amount_twd) as total
         FROM transactions t
         JOIN categories c ON t.category_id = c.id
-        WHERE strftime('%Y', t.date) = ? ${excludeFilter}
+        WHERE 1=1 ${excludeFilter} ${dateFilter}
         GROUP BY c.name, t.type
         ORDER BY total DESC
-    `).bind(year).all()
+    `).bind(...params).all()
 
     return c.json({ totals, monthly, categories })
 })
@@ -147,7 +185,7 @@ app.post('/api/transactions', async (c) => {
 })
 
 // ==========================================
-// [FRONTEND] Vue + Tailwind + Chart.js
+// [FRONTEND] Vue + Tailwind + Chart.js + DataLabels
 // ==========================================
 
 app.get('/', (c) => {
@@ -161,6 +199,7 @@ app.get('/', (c) => {
       <script src="https://cdn.tailwindcss.com"></script>
       <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
       <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+      <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
       <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
       <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
@@ -171,6 +210,10 @@ app.get('/', (c) => {
         input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
         .fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
         .fade-enter-from, .fade-leave-to { opacity: 0; }
+        
+        /* Modal 動畫 */
+        .modal-enter-active, .modal-leave-active { transition: all 0.2s ease; }
+        .modal-enter-from, .modal-leave-to { opacity: 0; transform: scale(0.95); }
       </style>
     </head>
     <body class="bg-slate-50 text-slate-800 h-screen overflow-hidden flex">
@@ -212,54 +255,62 @@ app.get('/', (c) => {
             <div class="flex-1 overflow-y-auto bg-slate-50 p-4 md:p-8 scroller">
                 
                 <div v-if="currentView === 'dashboard'" class="max-w-6xl mx-auto space-y-6">
-                    <div class="flex justify-end">
-                        <select v-model="selectedYear" @change="fetchStats" class="bg-white border border-slate-300 text-slate-700 py-1 px-3 rounded-lg text-sm font-bold shadow-sm outline-none">
-                            <option v-for="y in [2024,2025,2026]" :value="y">{{ y }}年</option>
-                        </select>
+                    <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-wrap items-center gap-4">
+                        <div class="text-sm font-bold text-slate-600"><i class="fa-solid fa-filter mr-2"></i>查詢區間</div>
+                        <div class="flex items-center gap-2">
+                            <input type="date" v-model="dateRange.start" class="bg-slate-50 border border-slate-300 rounded px-2 py-1 text-sm">
+                            <span class="text-slate-400">~</span>
+                            <input type="date" v-model="dateRange.end" class="bg-slate-50 border border-slate-300 rounded px-2 py-1 text-sm">
+                        </div>
+                        <div class="flex gap-2">
+                            <button @click="fetchStats" class="bg-slate-800 text-white px-3 py-1 rounded text-sm font-bold hover:bg-slate-700">查詢</button>
+                            <button @click="resetDateRange" class="text-slate-500 px-3 py-1 rounded text-sm hover:bg-slate-100">全部</button>
+                        </div>
                     </div>
 
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                         <div class="bg-slate-800 text-white p-6 rounded-2xl shadow-lg relative overflow-hidden">
-                            <div class="text-slate-400 text-sm mb-1">總淨資產 (TWD估算)</div>
+                            <div class="text-slate-400 text-sm mb-1">總淨資產 (TWD)</div>
                             <div class="text-3xl font-bold">{{ formatCurrency(totalNetWorth) }}</div>
                             <i class="fa-solid fa-shield-cat absolute -bottom-4 -right-4 text-8xl opacity-10"></i>
                         </div>
                         <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                            <div class="text-slate-500 text-sm mb-1">年度總收入 <span class="text-xs text-slate-300">(不含借貸/轉帳)</span></div>
+                            <div class="text-slate-500 text-sm mb-1">區間總收入 <span class="text-xs text-slate-300">(不含借貸/轉帳)</span></div>
                             <div class="text-3xl font-bold text-emerald-600">+{{ formatCurrency(stats.income) }}</div>
                         </div>
                         <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                            <div class="text-slate-500 text-sm mb-1">年度總支出</div>
+                            <div class="text-slate-500 text-sm mb-1">區間總支出</div>
                             <div class="text-3xl font-bold text-rose-600">-{{ formatCurrency(stats.expense) }}</div>
                         </div>
                     </div>
 
-                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                        <div class="lg:col-span-2 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                            <h3 class="font-bold text-slate-700 mb-4">收支趨勢</h3>
-                            <div class="h-64"><canvas id="barChart"></canvas></div>
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                        <h3 class="font-bold text-slate-700 mb-4">每月收支趨勢</h3>
+                        <div class="h-64 md:h-80"><canvas id="barChart"></canvas></div>
+                    </div>
+
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[400px]">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="font-bold text-slate-700">分類佔比分析</h3>
+                            <div class="flex bg-slate-100 rounded p-0.5">
+                                <button @click="pieType='EXPENSE'" :class="['text-xs px-3 py-1.5 rounded transition font-bold', pieType==='EXPENSE'?'bg-white shadow text-rose-500':'text-slate-400']">支出</button>
+                                <button @click="pieType='INCOME'" :class="['text-xs px-3 py-1.5 rounded transition font-bold', pieType==='INCOME'?'bg-white shadow text-emerald-500':'text-slate-400']">收入</button>
+                            </div>
                         </div>
-                        <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col">
-                            <div class="flex justify-between items-center mb-4">
-                                <h3 class="font-bold text-slate-700">分類佔比</h3>
-                                <div class="flex bg-slate-100 rounded p-0.5">
-                                    <button @click="pieType='EXPENSE'" :class="['text-xs px-2 py-1 rounded transition', pieType==='EXPENSE'?'bg-white shadow text-rose-500':'text-slate-400']">支出</button>
-                                    <button @click="pieType='INCOME'" :class="['text-xs px-2 py-1 rounded transition', pieType==='INCOME'?'bg-white shadow text-emerald-500':'text-slate-400']">收入</button>
-                                </div>
-                            </div>
-                            <div class="flex-1 flex items-center justify-center relative">
-                                <canvas id="pieChart"></canvas>
-                                <div v-if="!hasPieData" class="absolute text-slate-300 text-sm">無數據</div>
-                            </div>
+                        <div class="flex-1 relative">
+                            <canvas id="pieChart"></canvas>
+                            <div v-if="!hasPieData" class="absolute inset-0 flex items-center justify-center text-slate-300 text-sm">無數據</div>
                         </div>
                     </div>
                 </div>
 
                 <div v-if="currentView === 'add'" class="max-w-4xl mx-auto flex flex-col gap-6">
                     <div class="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden relative">
-                        <div v-if="editingId" class="bg-amber-100 text-amber-800 text-xs font-bold text-center py-1">正在編輯 (ID: {{ editingId }})</div>
+                        <button @click="showCategoryModal=true" class="absolute top-4 right-4 text-xs bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-1.5 rounded-lg font-bold transition flex items-center gap-1">
+                            <i class="fa-solid fa-gear"></i> 分類管理
+                        </button>
 
-                        <div class="bg-slate-50 p-4 border-b border-slate-100 flex justify-center">
+                        <div class="bg-slate-50 p-4 border-b border-slate-100 flex justify-center mt-6 md:mt-0">
                             <div class="grid grid-cols-4 gap-2 bg-slate-200/50 p-1 rounded-xl w-full max-w-lg">
                                 <button v-for="t in ['EXPENSE','INCOME','TRANSFER','TRANSFER_IN']" :key="t" @click="form.type=t"
                                     :class="['py-2 rounded-lg text-sm font-bold transition flex items-center justify-center gap-1', form.type===t ? typeColor(t) + ' text-white shadow-md' : 'text-slate-500 hover:text-slate-700']">
@@ -273,12 +324,10 @@ app.get('/', (c) => {
                                 <div><label class="text-xs font-bold text-slate-400 uppercase mb-1 block">日期</label><input type="date" v-model="form.date" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-blue-500"></div>
                                 <div><label class="text-xs font-bold text-slate-400 uppercase mb-1 block">帳戶</label><select v-model="form.account_id" @change="fetchRecent" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-blue-500"><option v-for="acc in accounts" :value="acc.id">{{ acc.name }}</option></select></div>
                             </div>
-
                             <div class="relative">
                                 <div class="flex justify-between mb-1"><label class="text-xs font-bold text-slate-400 uppercase">金額</label><label class="text-xs flex items-center gap-2"><input type="checkbox" v-model="isDetailMode" class="rounded text-blue-600"> 明細模式</label></div>
                                 <input type="number" v-model="form.amount_twd" :readonly="isDetailMode" placeholder="0" :class="['w-full rounded-xl px-4 py-4 text-3xl font-mono font-bold outline-none transition', isDetailMode?'bg-slate-100 text-slate-400':'bg-slate-50 border border-slate-200 focus:ring-2 focus:ring-blue-500 text-slate-800']">
                             </div>
-
                             <div v-if="isDetailMode" class="bg-slate-50 rounded-xl border border-slate-200 p-4 space-y-2">
                                 <div v-for="(child, idx) in form.children" :key="idx" class="flex gap-2">
                                     <select v-model="child.category_id" class="w-1/3 bg-white border border-slate-200 rounded-lg px-2 py-2 text-sm focus:border-blue-500"><option v-for="c in filteredCategories" :value="c.id">{{ c.name }}</option></select>
@@ -288,7 +337,6 @@ app.get('/', (c) => {
                                 </div>
                                 <button @click="addChild" class="text-xs text-blue-600 font-bold hover:underline">+ 新增一列</button>
                             </div>
-
                             <div v-else class="grid grid-cols-2 gap-4">
                                 <div><label class="text-xs font-bold text-slate-400 uppercase mb-1 block">分類</label><select v-model="form.category_id" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-blue-500"><option v-for="c in filteredCategories" :value="c.id">{{ c.name }}</option></select></div>
                                 <div><label class="text-xs font-bold text-slate-400 uppercase mb-1 block">備註</label><input type="text" v-model="form.note" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-blue-500"></div>
@@ -296,10 +344,7 @@ app.get('/', (c) => {
                         </div>
                         
                         <div class="p-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-3">
-                            <button v-if="editingId" @click="cancelEdit" class="px-6 py-3 rounded-xl font-bold text-slate-500 hover:bg-slate-200 transition">取消</button>
-                            <button @click="submit" :disabled="isSubmitting" class="bg-slate-900 text-white px-8 py-3 rounded-xl font-bold shadow hover:bg-slate-800 transition disabled:opacity-50">
-                                {{ editingId ? '更新交易' : '確認記帳' }}
-                            </button>
+                            <button @click="submit" :disabled="isSubmitting" class="bg-slate-900 text-white px-8 py-3 rounded-xl font-bold shadow hover:bg-slate-800 transition disabled:opacity-50 w-full md:w-auto">確認記帳</button>
                         </div>
                     </div>
 
@@ -319,7 +364,7 @@ app.get('/', (c) => {
                                         <td class="p-3 text-slate-500">{{ t.note }}</td>
                                         <td :class="['p-3 text-right font-mono font-bold', getAmountClass(t)]">{{ t.type==='EXPENSE'?'-':'+' }}{{ formatAmount(t) }}</td>
                                         <td class="p-3 text-center flex justify-center items-center gap-4">
-                                            <button @click="editTransaction(t)" class="text-slate-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-pen"></i></button>
+                                            <button @click="openEditModal(t)" class="text-slate-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-pen"></i></button>
                                             <button @click="deleteTransaction(t.id)" class="text-slate-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-trash-can"></i></button>
                                         </td>
                                     </tr>
@@ -372,7 +417,7 @@ app.get('/', (c) => {
                                             <td class="p-4 text-right font-mono text-slate-500">{{ formatCurrency(t.running_balance, currentAccount?.currency) }}</td>
                                             <td class="p-4 text-center flex justify-center items-center gap-4" @click.stop>
                                                 <div v-if="t.type!=='BALANCE'" class="flex gap-4">
-                                                    <button @click="editTransaction(t)" class="text-slate-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-pen"></i></button>
+                                                    <button @click="openEditModal(t)" class="text-slate-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-pen"></i></button>
                                                     <button @click="deleteTransaction(t.id)" class="text-slate-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-trash-can"></i></button>
                                                 </div>
                                             </td>
@@ -392,12 +437,87 @@ app.get('/', (c) => {
                     </div>
                 </div>
 
+                <transition name="modal">
+                <div v-if="showEditModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+                    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
+                        <div class="p-4 bg-slate-900 text-white font-bold flex justify-between items-center">
+                            <span>編輯交易</span>
+                            <button @click="showEditModal=false" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-xl"></i></button>
+                        </div>
+                        <div class="p-6 overflow-y-auto scroller">
+                            <div class="grid grid-cols-4 gap-2 bg-slate-100 p-1 rounded-xl mb-4">
+                                <button v-for="t in ['EXPENSE','INCOME','TRANSFER','TRANSFER_IN']" :key="t" @click="editForm.type=t"
+                                    :class="['py-2 rounded-lg text-xs font-bold transition', editForm.type===t ? typeColor(t) + ' text-white shadow' : 'text-slate-500']">
+                                    {{ typeName(t) }}
+                                </button>
+                            </div>
+                            <div class="grid grid-cols-2 gap-4 mb-4">
+                                <div><label class="text-xs font-bold text-slate-400 mb-1 block">日期</label><input type="date" v-model="editForm.date" class="w-full bg-slate-50 border rounded px-3 py-2"></div>
+                                <div><label class="text-xs font-bold text-slate-400 mb-1 block">帳戶</label><select v-model="editForm.account_id" class="w-full bg-slate-50 border rounded px-3 py-2"><option v-for="acc in accounts" :value="acc.id">{{ acc.name }}</option></select></div>
+                            </div>
+                            <div class="mb-4">
+                                <label class="text-xs font-bold text-slate-400 mb-1 block">金額</label>
+                                <input type="number" v-model="editForm.amount_twd" :readonly="isEditDetailMode" class="w-full bg-slate-50 border rounded px-4 py-3 text-2xl font-mono font-bold">
+                                <label class="flex items-center gap-2 mt-2 text-xs"><input type="checkbox" v-model="isEditDetailMode"> 明細模式</label>
+                            </div>
+                            <div v-if="isEditDetailMode" class="bg-slate-50 rounded border p-3 space-y-2 mb-4">
+                                <div v-for="(child, idx) in editForm.children" :key="idx" class="flex gap-2">
+                                    <select v-model="child.category_id" class="w-1/3 border rounded text-sm"><option v-for="c in editFilteredCategories" :value="c.id">{{ c.name }}</option></select>
+                                    <input type="text" v-model="child.note" class="flex-1 border rounded text-sm px-2">
+                                    <input type="number" v-model="child.amount_twd" class="w-20 border rounded text-sm px-1 text-right">
+                                    <button @click="removeEditChild(idx)" class="text-rose-500"><i class="fa-solid fa-xmark"></i></button>
+                                </div>
+                                <button @click="addEditChild" class="text-xs text-blue-600 font-bold">+ 新增明細</button>
+                            </div>
+                            <div v-else class="grid grid-cols-2 gap-4 mb-4">
+                                <div><label class="text-xs font-bold text-slate-400 mb-1 block">分類</label><select v-model="editForm.category_id" class="w-full border rounded px-3 py-2"><option v-for="c in editFilteredCategories" :value="c.id">{{ c.name }}</option></select></div>
+                                <div><label class="text-xs font-bold text-slate-400 mb-1 block">備註</label><input type="text" v-model="editForm.note" class="w-full border rounded px-3 py-2"></div>
+                            </div>
+                        </div>
+                        <div class="p-4 border-t bg-slate-50 flex justify-end gap-3">
+                            <button @click="showEditModal=false" class="px-4 py-2 rounded text-slate-500 font-bold">取消</button>
+                            <button @click="submitEdit" class="px-6 py-2 bg-emerald-600 text-white rounded font-bold shadow">儲存變更</button>
+                        </div>
+                    </div>
+                </div>
+                </transition>
+
+                <transition name="modal">
+                <div v-if="showCategoryModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+                    <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[80vh] flex flex-col overflow-hidden">
+                        <div class="p-4 bg-slate-800 text-white font-bold flex justify-between items-center">
+                            <span>分類管理</span>
+                            <button @click="showCategoryModal=false" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+                        </div>
+                        <div class="p-4 flex gap-2 border-b">
+                            <input v-model="newCategoryName" type="text" placeholder="輸入新分類名稱" class="flex-1 border rounded px-3 py-2 text-sm">
+                            <select v-model="newCategoryType" class="border rounded px-2 py-2 text-sm">
+                                <option value="EXPENSE">支出</option><option value="INCOME">收入</option><option value="TRANSFER">轉帳</option>
+                            </select>
+                            <button @click="addCategory" class="bg-blue-600 text-white px-3 rounded text-sm font-bold">新增</button>
+                        </div>
+                        <div class="flex-1 overflow-y-auto p-2">
+                            <div v-for="c in categories" :key="c.id" class="flex justify-between items-center p-3 hover:bg-slate-50 border-b last:border-0">
+                                <div class="flex items-center gap-3">
+                                    <span :class="['w-2 h-2 rounded-full', c.type==='EXPENSE'?'bg-rose-500':(c.type==='INCOME'?'bg-emerald-500':'bg-blue-500')]"></span>
+                                    <span class="font-bold text-slate-700">{{ c.name }}</span>
+                                </div>
+                                <button @click="deleteCategory(c.id)" class="text-slate-300 hover:text-rose-500"><i class="fa-solid fa-trash-can"></i></button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                </transition>
+
             </div>
         </main>
       </div>
 
       <script>
         const { createApp, ref, computed, onMounted, watch, nextTick } = Vue
+        // 註冊 DataLabels 插件
+        Chart.register(ChartDataLabels);
+
         let barChartInstance = null, pieChartInstance = null
         
         const initialBalances = { 1: 170687, 2: 66892, 3: 0, 4: 84565, 5: 620623, 6: 35030, 7: 52917, 8: 0, 9: 887203 }
@@ -407,33 +527,50 @@ app.get('/', (c) => {
                 const currentView = ref('dashboard')
                 const isSubmitting = ref(false)
                 const isDetailMode = ref(false)
-                const selectedYear = ref(2025)
+                const dateRange = ref({ start: '', end: '' }) // 自訂日期區間
                 const pieType = ref('EXPENSE')
+                
+                // Modals
+                const showEditModal = ref(false)
+                const showCategoryModal = ref(false)
                 const editingId = ref(null)
                 
+                // Category Management
+                const newCategoryName = ref('')
+                const newCategoryType = ref('EXPENSE')
+
                 const categories = ref([]); const accounts = ref([])
                 const recentTransactions = ref([]); const detailTransactions = ref([])
                 const currentAccount = ref(null)
                 const stats = ref({ income: 0, expense: 0, monthly: [], categories: [] })
 
-                // TRANSFER_IN 是一個虛擬的前端類型，後端存為 INCOME 但方便我們篩選分類
                 const form = ref({ date: new Date().toISOString().split('T')[0], account_id: '', type: 'EXPENSE', category_id: '', amount_twd: '', note: '', children: [] })
+                const editForm = ref({ date: '', account_id: '', type: 'EXPENSE', category_id: '', amount_twd: '', note: '', children: [] })
+                const isEditDetailMode = ref(false)
 
+                // Watchers for calculations
                 watch(() => form.value.children, (newVal) => { if (isDetailMode.value) form.value.amount_twd = newVal.reduce((acc, curr) => acc + (Number(curr.amount_twd) || 0), 0) || '' }, { deep: true })
                 watch(isDetailMode, (val) => { if(val && !form.value.children.length) addChild(); if(!val) form.value.children=[] })
+                
+                // Edit Form Watchers
+                watch(() => editForm.value.children, (newVal) => { if (isEditDetailMode.value) editForm.value.amount_twd = newVal.reduce((acc, curr) => acc + (Number(curr.amount_twd) || 0), 0) || '' }, { deep: true })
+                watch(isEditDetailMode, (val) => { if(val && !editForm.value.children?.length) addEditChild(); if(!val) editForm.value.children=[] })
+
                 watch(pieType, () => renderCharts())
 
+                // Computeds
                 const currentCurrency = computed(() => accounts.value.find(a => a.id === form.value.account_id)?.currency || 'TWD')
                 const selectedAccountName = computed(() => accounts.value.find(a => a.id === form.value.account_id)?.name)
                 
-                // 分類篩選邏輯：如果是 TRANSFER_IN，我們要顯示「轉帳類」的分類，但存入資料庫時會變成 INCOME
-                const filteredCategories = computed(() => {
+                const filterCats = (type) => {
                     return categories.value.filter(c => {
-                        if (form.value.type === 'TRANSFER_IN') return c.type === 'TRANSFER' // 顯示轉帳類分類
-                        if (form.value.type === 'TRANSFER') return c.type === 'TRANSFER'
-                        return c.type === form.value.type
+                        if (type === 'TRANSFER_IN') return c.type === 'TRANSFER'
+                        if (type === 'TRANSFER') return c.type === 'TRANSFER'
+                        return c.type === type
                     })
-                })
+                }
+                const filteredCategories = computed(() => filterCats(form.value.type))
+                const editFilteredCategories = computed(() => filterCats(editForm.value.type))
 
                 const totalNetWorth = computed(() => accounts.value.reduce((sum, acc) => {
                     let rate = 1; if(acc.currency==='JPY') rate=0.21; if(acc.currency==='USD') rate=32;
@@ -441,34 +578,37 @@ app.get('/', (c) => {
                 }, 0))
                 const hasPieData = computed(() => stats.value.categories.filter(c => c.type === pieType.value).length > 0)
 
-                const formatCurrency = (val, cur='TWD') => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: cur, minimumFractionDigits:0 }).format(val || 0)
+                // Helpers
+                const formatCurrency = (val, cur='TWD') => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: cur, maximumFractionDigits: 0 }).format(val || 0)
                 const formatAmount = (t) => formatCurrency(t.amount_twd, accounts.value.find(a=>a.id===t.account_id)?.currency)
                 const typeName = (t) => ({'EXPENSE':'支出','INCOME':'收入','TRANSFER':'轉出','TRANSFER_IN':'轉入'}[t])
                 const typeColor = (t) => ({'EXPENSE':'bg-rose-500','INCOME':'bg-emerald-500','TRANSFER':'bg-blue-500','TRANSFER_IN':'bg-emerald-600'}[t])
                 const navClass = (v) => ['w-full text-left px-4 py-2.5 rounded-lg flex items-center gap-3 transition font-medium', currentView.value===v ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:bg-slate-800 hover:text-white']
                 const mobileNavClass = (v) => ['px-4 py-2 rounded-md text-xl transition', currentView.value===v ? 'bg-white shadow text-emerald-600' : 'text-slate-400']
-
                 const getAmountClass = (t) => {
                     if (t.type === 'BALANCE') return ''
-                    // 轉帳/借貸：轉入(INCOME)淡綠，轉出(EXPENSE/TRANSFER)淡紅
                     const isTransfer = t.category_name === '帳戶間移轉' || t.category_name === '借入/負債' || t.category_type === 'TRANSFER'
                     if (t.type === 'INCOME') return isTransfer ? 'text-emerald-400' : 'text-emerald-600'
                     return isTransfer ? 'text-rose-400' : 'text-rose-600'
                 }
 
+                // Actions
                 const addChild = () => form.value.children.push({ category_id: '', amount_twd: '', note: '' })
                 const removeChild = (idx) => form.value.children.splice(idx, 1)
+                const addEditChild = () => editForm.value.children.push({ category_id: '', amount_twd: '', note: '' })
+                const removeEditChild = (idx) => editForm.value.children.splice(idx, 1)
 
                 const fetchData = async () => {
                     const [c, a] = await Promise.all([fetch('/api/categories').then(r=>r.json()), fetch('/api/accounts').then(r=>r.json())])
                     categories.value = c; accounts.value = a
-                    if(!form.value.account_id && a.length>0 && !editingId.value) form.value.account_id = a[0].id
+                    if(!form.value.account_id && a.length>0) form.value.account_id = a[0].id
                 }
 
                 const fetchRecent = async () => { if(!form.value.account_id) return; const res = await fetch(\`/api/transactions?account_id=\${form.value.account_id}&limit=20\`); recentTransactions.value = await res.json() }
                 
                 const fetchStats = async () => {
-                    const res = await fetch(\`/api/stats?year=\${selectedYear.value}\`)
+                    const query = new URLSearchParams({ start: dateRange.value.start, end: dateRange.value.end }).toString()
+                    const res = await fetch(\`/api/stats?\${query}\`)
                     const data = await res.json()
                     stats.value.income = data.totals.find(t=>t.type==='INCOME')?.total || 0
                     stats.value.expense = data.totals.find(t=>t.type==='EXPENSE')?.total || 0
@@ -476,12 +616,9 @@ app.get('/', (c) => {
                     if(currentView.value === 'dashboard') nextTick(renderCharts)
                 }
 
-                const changeView = (v, reset = true) => { 
-                    currentView.value = v
-                    if (reset) cancelEdit() 
-                    if(v==='dashboard') fetchStats()
-                    if(v==='accounts') fetchData() 
-                }
+                const resetDateRange = () => { dateRange.value = { start: '', end: '' }; fetchStats() }
+
+                const changeView = (v) => { currentView.value = v; if(v==='dashboard') fetchStats(); if(v==='accounts') fetchData() }
 
                 const openDetail = async (acc) => {
                     currentAccount.value = acc
@@ -489,51 +626,61 @@ app.get('/', (c) => {
                     const res = await fetch(\`/api/transactions?account_id=\${acc.id}&limit=100\`)
                     const data = await res.json()
                     let running = acc.balance_twd
-                    
                     const list = data.map((t) => {
                         const currentBal = running
                         if (t.type === 'INCOME') running -= t.amount_twd
                         else running += t.amount_twd
                         return { ...t, running_balance: currentBal, expanded: false }
                     })
-                    
                     const initBal = initialBalances[acc.id] || 0
                     list.push({ id: 'init', date: '2025-01-01', type: 'BALANCE', amount_twd: null, running_balance: initBal, note: '初始餘額', expanded: false })
-                    
                     detailTransactions.value = list
                 }
 
                 const deleteTransaction = async (id) => { if(!confirm('確定刪除？')) return; await fetch(\`/api/transactions/\${id}\`, { method: 'DELETE' }); fetchData(); fetchRecent(); if(currentView.value==='account_detail') openDetail(currentAccount.value) }
 
-                const editTransaction = (t) => {
-                    editingId.value = t.id
-                    isDetailMode.value = t.children && t.children.length > 0
-                    
-                    // 判斷類型：如果是 INCOME 且分類是轉帳類，前端設為 TRANSFER_IN
-                    let viewType = t.type
-                    if (t.type === 'INCOME' && (t.category_name === '帳戶間移轉' || t.category_type === 'TRANSFER')) {
-                        viewType = 'TRANSFER_IN'
-                    }
+                // Category Management
+                const addCategory = async () => {
+                    if(!newCategoryName.value) return
+                    await fetch('/api/categories', { method: 'POST', body: JSON.stringify({ name: newCategoryName.value, type: newCategoryType.value }) })
+                    newCategoryName.value = ''; fetchData()
+                }
+                const deleteCategory = async (id) => { if(!confirm('刪除分類不會刪除關聯交易，確定？')) return; await fetch(\`/api/categories/\${id}\`, { method: 'DELETE' }); fetchData() }
 
-                    form.value = { date: t.date, account_id: t.account_id, category_id: t.category_id, type: viewType, amount_twd: t.amount_twd, note: t.note, children: t.children ? JSON.parse(JSON.stringify(t.children)) : [] }
-                    changeView('add', false) // false = 不要清空表單
+                // Edit Logic (Modal)
+                const openEditModal = (t) => {
+                    editingId.value = t.id
+                    isEditDetailMode.value = t.children && t.children.length > 0
+                    let viewType = t.type
+                    if (t.type === 'INCOME' && (t.category_name === '帳戶間移轉' || t.category_type === 'TRANSFER')) viewType = 'TRANSFER_IN'
+                    
+                    editForm.value = { 
+                        date: t.date, account_id: t.account_id, category_id: t.category_id, 
+                        type: viewType, amount_twd: t.amount_twd, note: t.note, 
+                        children: t.children ? JSON.parse(JSON.stringify(t.children)) : [] 
+                    }
+                    showEditModal.value = true
                 }
 
-                const cancelEdit = () => { editingId.value = null; form.value = { date: new Date().toISOString().split('T')[0], account_id: accounts.value[0]?.id, type: 'EXPENSE', category_id: '', amount_twd: '', note: '', children: [] }; isDetailMode.value = false }
+                const submitEdit = async () => {
+                    if(!editForm.value.account_id || !editForm.value.amount_twd) return alert('金額未填')
+                    try {
+                        const payloadType = editForm.value.type === 'TRANSFER_IN' ? 'INCOME' : editForm.value.type
+                        const payload = { main: {...editForm.value, type: payloadType}, children: isEditDetailMode.value ? editForm.value.children : [] }
+                        await fetch(\`/api/transactions/\${editingId.value}\`, { method: 'PUT', body: JSON.stringify(payload) })
+                        alert('更新成功'); showEditModal.value = false; fetchData(); fetchRecent(); 
+                        if(currentView.value==='account_detail') openDetail(currentAccount.value)
+                    } catch(e){ alert('錯誤') }
+                }
 
                 const submit = async () => {
                     if(!form.value.account_id || !form.value.amount_twd) return alert('金額未填')
                     isSubmitting.value = true
                     try {
-                        // 如果前端選的是 TRANSFER_IN，送出時轉為 INCOME
                         const payloadType = form.value.type === 'TRANSFER_IN' ? 'INCOME' : form.value.type
                         const payload = { main: {...form.value, type: payloadType}, children: isDetailMode.value ? form.value.children : [] }
-                        
-                        const url = editingId.value ? \`/api/transactions/\${editingId.value}\` : '/api/transactions'
-                        const method = editingId.value ? 'PUT' : 'POST'
-                        await fetch(url, { method, body: JSON.stringify(payload) })
-                        alert(editingId.value ? '更新成功' : '記帳成功')
-                        cancelEdit(); fetchRecent(); fetchData()
+                        await fetch('/api/transactions', { method: 'POST', body: JSON.stringify(payload) })
+                        alert('記帳成功'); form.value.amount_twd=''; form.value.children=[]; form.value.note=''; fetchRecent(); fetchData()
                     } catch(e){ alert('錯誤') } finally { isSubmitting.value = false }
                 }
 
@@ -542,19 +689,60 @@ app.get('/', (c) => {
                     if(!ctxBar || !ctxPie) return
                     if(barChartInstance) barChartInstance.destroy(); if(pieChartInstance) pieChartInstance.destroy()
 
-                    const labels = Array.from({length:12}, (_,i) => \`\${i+1}月\`)
-                    const incomeData = labels.map((_, i) => stats.value.monthly.find(m => m.month.endsWith(\`-\${String(i+1).padStart(2,'0')}\`) && m.type==='INCOME')?.total || 0)
-                    const expenseData = labels.map((_, i) => stats.value.monthly.find(m => m.month.endsWith(\`-\${String(i+1).padStart(2,'0')}\`) && m.type==='EXPENSE')?.total || 0)
+                    // Bar Chart
+                    const labels = stats.value.monthly.map(m => m.month)
+                    // 為了對齊，需要整理 unique months
+                    const uniqueMonths = [...new Set(stats.value.monthly.map(m => m.month))]
+                    const incomeData = uniqueMonths.map(m => stats.value.monthly.find(x => x.month===m && x.type==='INCOME')?.total || 0)
+                    const expenseData = uniqueMonths.map(m => stats.value.monthly.find(x => x.month===m && x.type==='EXPENSE')?.total || 0)
 
-                    barChartInstance = new Chart(ctxBar, { type: 'bar', data: { labels, datasets: [{ label: '收入', data: incomeData, backgroundColor: '#10b981', borderRadius: 4 }, { label: '支出', data: expenseData, backgroundColor: '#f43f5e', borderRadius: 4 }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, grid: { display: false } }, x: { grid: { display: false } } } } })
+                    barChartInstance = new Chart(ctxBar, {
+                        type: 'bar',
+                        data: { labels: uniqueMonths, datasets: [{ label: '收入', data: incomeData, backgroundColor: '#10b981', borderRadius: 4 }, { label: '支出', data: expenseData, backgroundColor: '#f43f5e', borderRadius: 4 }] },
+                        options: { 
+                            responsive: true, maintainAspectRatio: false, 
+                            scales: { y: { beginAtZero: true, grid: { display: false } }, x: { grid: { display: false } } },
+                            plugins: { datalabels: { anchor: 'end', align: 'top', font: { weight: 'bold' }, formatter: (val) => val > 0 ? val : '' } }
+                        }
+                    })
+
+                    // Pie Chart
                     const pieData = stats.value.categories.filter(c => c.type === pieType.value)
                     const otherTotal = pieData.slice(5).reduce((sum, c) => sum + c.total, 0)
                     const finalPieData = pieData.slice(0, 5)
                     if(otherTotal > 0) finalPieData.push({ name: '其他', total: otherTotal })
-                    pieChartInstance = new Chart(ctxPie, { type: 'doughnut', data: { labels: finalPieData.map(d => d.name), datasets: [{ data: finalPieData.map(d => d.total), backgroundColor: ['#3b82f6', '#f59e0b', '#10b981', '#f43f5e', '#8b5cf6', '#cbd5e1'], borderWidth: 0 }] }, options: { responsive: true, maintainAspectRatio: false, cutout: '70%', plugins: { legend: { position: 'right' } } } })
+                    
+                    pieChartInstance = new Chart(ctxPie, {
+                        type: 'doughnut',
+                        data: { labels: finalPieData.map(d => d.name), datasets: [{ data: finalPieData.map(d => d.total), backgroundColor: ['#3b82f6', '#f59e0b', '#10b981', '#f43f5e', '#8b5cf6', '#cbd5e1'], borderWidth: 0 }] },
+                        options: { 
+                            responsive: true, maintainAspectRatio: false, cutout: '60%', 
+                            plugins: { 
+                                legend: { position: 'right' },
+                                datalabels: { color: '#fff', font: { weight: 'bold' }, formatter: (val, ctx) => {
+                                    let sum = 0; let dataArr = ctx.chart.data.datasets[0].data;
+                                    dataArr.map(data => { sum += data; });
+                                    let percentage = (val*100 / sum).toFixed(0) + "%";
+                                    return percentage;
+                                } }
+                            } 
+                        }
+                    })
                 }
+                
                 onMounted(() => { fetchData(); fetchStats() })
-                return { currentView, isSubmitting, isDetailMode, selectedYear, pieType, hasPieData, editingId, categories, accounts, recentTransactions, detailTransactions, currentAccount, stats, form, currentCurrency, selectedAccountName, filteredCategories, totalNetWorth, navClass, mobileNavClass, typeName, typeColor, formatCurrency, formatAmount, addChild, removeChild, changeView, openDetail, fetchRecent, submit, deleteTransaction, fetchStats, editTransaction, cancelEdit, getAmountClass }
+                
+                return { 
+                    currentView, isSubmitting, isDetailMode, dateRange, pieType, hasPieData, 
+                    showEditModal, showCategoryModal, editingId, editForm, isEditDetailMode,
+                    newCategoryName, newCategoryType,
+                    categories, accounts, recentTransactions, detailTransactions, currentAccount, stats, form, 
+                    currentCurrency, selectedAccountName, filteredCategories, editFilteredCategories, totalNetWorth, 
+                    navClass, mobileNavClass, typeName, typeColor, formatCurrency, formatAmount, getAmountClass,
+                    addChild, removeChild, addEditChild, removeEditChild,
+                    changeView, openDetail, fetchRecent, submit, submitEdit, deleteTransaction, fetchStats, resetDateRange,
+                    openEditModal, addCategory, deleteCategory
+                }
             }
         }).mount('#app')
       </script>
