@@ -76,20 +76,18 @@ app.get('/api/transactions', async (c) => {
   return c.json(transactionsWithChildren)
 })
 
-// 4. 統計 API (支援日期與銀行篩選)
+// 4. 統計 API
 app.get('/api/stats', async (c) => {
     const start = c.req.query('start')
     const end = c.req.query('end')
-    const accountIds = c.req.query('account_ids') // "1,2,3"
+    const accountIds = c.req.query('account_ids')
     
     let filters = ''
     const params: any[] = []
 
-    // 日期過濾
     if (start) { filters += ` AND t.date >= ? `; params.push(start) }
     if (end) { filters += ` AND t.date <= ? `; params.push(end) }
 
-    // 銀行過濾 (直接組裝 ID 字串，注意安全性，但這裡是內部 ID 均為數字)
     if (accountIds) {
         const ids = accountIds.split(',').map(n => parseInt(n)).filter(n => !isNaN(n))
         if (ids.length > 0) {
@@ -97,12 +95,8 @@ app.get('/api/stats', async (c) => {
         }
     }
     
-    // 【關鍵修正】排除所有轉帳性質交易
-    // 1. 排除分類名稱為 '借入/負債' 或 '帳戶間移轉'
-    // 2. 排除分類類型為 'TRANSFER' (這樣 Transfer In 也會被排除)
     const excludeFilter = ` AND c.name NOT IN ('借入/負債', '帳戶間移轉') AND c.type != 'TRANSFER' `
 
-    // A. 總收支
     const { results: totals } = await c.env.DB.prepare(`
         SELECT t.type, SUM(t.amount_twd) as total 
         FROM transactions t
@@ -111,7 +105,6 @@ app.get('/api/stats', async (c) => {
         GROUP BY t.type
     `).bind(...params).all()
 
-    // B. 每月趨勢
     const { results: monthly } = await c.env.DB.prepare(`
         SELECT strftime('%Y-%m', t.date) as month, t.type, SUM(t.amount_twd) as total 
         FROM transactions t
@@ -121,7 +114,6 @@ app.get('/api/stats', async (c) => {
         ORDER BY month
     `).bind(...params).all()
 
-    // C. 分類佔比
     const { results: categories } = await c.env.DB.prepare(`
         SELECT c.name, t.type, SUM(t.amount_twd) as total
         FROM transactions t
@@ -191,7 +183,7 @@ app.post('/api/transactions', async (c) => {
 })
 
 // ==========================================
-// [FRONTEND]
+// [FRONTEND] Vue + Tailwind + Chart.js + DataLabels
 // ==========================================
 
 app.get('/', (c) => {
@@ -384,7 +376,9 @@ app.get('/', (c) => {
                                         <td class="p-3 text-slate-500 font-mono">{{ t.date }}</td>
                                         <td class="p-3 font-bold text-slate-700">{{ t.category_name }}</td>
                                         <td class="p-3 text-slate-500">{{ t.note }}</td>
-                                        <td :class="['p-3 text-right font-mono font-bold', getAmountClass(t)]">{{ t.type==='EXPENSE'?'-':'+' }}{{ formatAmount(t) }}</td>
+                                        <td :class="['p-3 text-right font-mono font-bold', getAmountClass(t)]">
+                                            {{ (t.type==='EXPENSE' || t.type==='TRANSFER') ? '-' : '+' }}{{ formatAmount(t) }}
+                                        </td>
                                         <td class="p-3 text-center flex justify-center items-center gap-4">
                                             <button @click="openEditModal(t)" class="text-slate-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-pen"></i></button>
                                             <button @click="deleteTransaction(t.id)" class="text-slate-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-trash-can"></i></button>
@@ -435,7 +429,7 @@ app.get('/', (c) => {
                                             </td>
                                             <td class="p-4 text-slate-500 max-w-xs truncate">{{ t.note }}</td>
                                             <td :class="['p-4 text-right font-mono font-bold whitespace-nowrap', getAmountClass(t)]">
-                                                {{ t.type==='EXPENSE'?'-':(t.type==='INCOME'?'+':'') }}{{ t.amount_twd ? formatCurrency(t.amount_twd, currentAccount?.currency) : '-' }}
+                                                {{ t.type==='BALANCE' ? '' : ((t.type==='EXPENSE' || t.type==='TRANSFER') ? '-' : '+') }}{{ t.amount_twd ? formatCurrency(t.amount_twd, currentAccount?.currency) : '-' }}
                                             </td>
                                             <td class="p-4 text-right font-mono text-slate-500 whitespace-nowrap">{{ formatCurrency(t.running_balance, currentAccount?.currency) }}</td>
                                             <td class="p-4 text-center flex justify-center items-center gap-4" @click.stop>
@@ -556,7 +550,7 @@ app.get('/', (c) => {
                 const showEditModal = ref(false)
                 const showCategoryModal = ref(false)
                 const editingId = ref(null)
-                const selectedBanks = ref([]) // 銀行篩選ID陣列
+                const selectedBanks = ref([]) 
                 
                 const newCategoryName = ref('')
                 const newCategoryType = ref('EXPENSE')
@@ -575,6 +569,11 @@ app.get('/', (c) => {
                 watch(() => editForm.value.children, (newVal) => { if (isEditDetailMode.value) editForm.value.amount_twd = newVal.reduce((acc, curr) => acc + (Number(curr.amount_twd) || 0), 0) || '' }, { deep: true })
                 watch(isEditDetailMode, (val) => { if(val && !editForm.value.children?.length) addEditChild(); if(!val) editForm.value.children=[] })
                 watch(pieType, () => renderCharts())
+                
+                // localStorage for Banks
+                watch(selectedBanks, (val) => {
+                    localStorage.setItem('selectedBanks', JSON.stringify(val))
+                }, { deep: true })
 
                 const currentCurrency = computed(() => accounts.value.find(a => a.id === form.value.account_id)?.currency || 'TWD')
                 const selectedAccountName = computed(() => accounts.value.find(a => a.id === form.value.account_id)?.name)
@@ -602,6 +601,7 @@ app.get('/', (c) => {
                 const typeColor = (t) => ({'EXPENSE':'bg-rose-500','INCOME':'bg-emerald-500','TRANSFER':'bg-blue-500','TRANSFER_IN':'bg-emerald-600'}[t])
                 const navClass = (v) => ['w-full text-left px-4 py-2.5 rounded-lg flex items-center gap-3 transition font-medium', currentView.value===v ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:bg-slate-800 hover:text-white']
                 const mobileNavClass = (v) => ['px-4 py-2 rounded-md text-xl transition', currentView.value===v ? 'bg-white shadow text-emerald-600' : 'text-slate-400']
+                
                 const getAmountClass = (t) => {
                     if (t.type === 'BALANCE') return ''
                     const isTransfer = t.category_name === '帳戶間移轉' || t.category_name === '借入/負債' || t.category_type === 'TRANSFER'
@@ -617,7 +617,14 @@ app.get('/', (c) => {
                 const fetchData = async () => {
                     const [c, a] = await Promise.all([fetch('/api/categories').then(r=>r.json()), fetch('/api/accounts').then(r=>r.json())])
                     categories.value = c; accounts.value = a
-                    if (selectedBanks.value.length === 0) selectedBanks.value = a.map(acc => acc.id) // 預設全選
+                    
+                    const saved = localStorage.getItem('selectedBanks')
+                    if (saved) {
+                        selectedBanks.value = JSON.parse(saved)
+                    } else {
+                        selectedBanks.value = a.map(acc => acc.id) 
+                    }
+                    
                     if(!form.value.account_id && a.length>0) form.value.account_id = a[0].id
                 }
 
