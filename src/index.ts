@@ -76,7 +76,7 @@ app.get('/api/transactions', async (c) => {
   return c.json(transactionsWithChildren)
 })
 
-// 4. 統計 API (含關鍵字分析)
+// 4. 統計 API
 app.get('/api/stats', async (c) => {
     const start = c.req.query('start')
     const end = c.req.query('end')
@@ -95,10 +95,8 @@ app.get('/api/stats', async (c) => {
         }
     }
     
-    // 排除分類
     const excludeFilter = ` AND c.name NOT IN ('借入/負債', '帳戶間移轉') AND c.type != 'TRANSFER' `
 
-    // A. 總收支
     const { results: totals } = await c.env.DB.prepare(`
         SELECT t.type, SUM(t.amount_twd) as total 
         FROM transactions t
@@ -107,7 +105,6 @@ app.get('/api/stats', async (c) => {
         GROUP BY t.type
     `).bind(...params).all()
 
-    // B. 每月趨勢
     const { results: monthly } = await c.env.DB.prepare(`
         SELECT strftime('%Y-%m', t.date) as month, t.type, SUM(t.amount_twd) as total 
         FROM transactions t
@@ -117,7 +114,6 @@ app.get('/api/stats', async (c) => {
         ORDER BY month
     `).bind(...params).all()
 
-    // C. 分類佔比
     const { results: categories } = await c.env.DB.prepare(`
         SELECT c.name, t.type, SUM(t.amount_twd) as total
         FROM transactions t
@@ -127,42 +123,7 @@ app.get('/api/stats', async (c) => {
         ORDER BY total DESC
     `).bind(...params).all()
 
-    // D. 關鍵字分析 (新功能)
-    // 抓取所有符合條件的交易備註，在後端進行簡單統計
-    const { results: rawNotes } = await c.env.DB.prepare(`
-        SELECT t.note, t.amount_twd
-        FROM transactions t
-        LEFT JOIN categories c ON t.category_id = c.id
-        WHERE t.note IS NOT NULL AND t.note != '' ${excludeFilter} ${filters}
-    `).bind(...params).all()
-
-    const keywordMap = new Map<string, number>()
-    
-    rawNotes.forEach((row: any) => {
-        // 1. 去除括號及其內容 (若想保留括號內文字可改邏輯，這裡採用去除括號符號本身)
-        // 策略：將 [xx] 和 xx 視為相同 -> 移除 [ 和 ] 符號
-        // 另外移除前後空白
-        let key = row.note.replace(/[\[\]]/g, '').trim()
-        
-        // 2. 簡單過濾：如果處理後是空的，或純數字，跳過
-        if (!key || /^\d+$/.test(key)) return
-
-        // 3. 為了避免 "日常支出 7-11" 和 "7-11" 算不同，可以考慮只取空格後的部分？
-        // 但目前先採取完整保留策略，讓用戶自己決定怎麼打
-        // 您提到的：[存款息] 和 存款息 -> 去除括號後都是 "存款息"
-        
-        const currentVal = keywordMap.get(key) || 0
-        // 這裡可以選擇統計「次數」還是「金額」。通常看關鍵字是想看「錢花哪去」，所以統計金額
-        keywordMap.set(key, currentVal + (row.amount_twd || 0))
-    })
-
-    // 轉為陣列並排序 (取前 15 名)
-    const keywords = Array.from(keywordMap.entries())
-        .map(([name, total]) => ({ name, total }))
-        .sort((a, b) => b.total - a.total)
-        .slice(0, 15)
-
-    return c.json({ totals, monthly, categories, keywords })
+    return c.json({ totals, monthly, categories })
 })
 
 app.delete('/api/transactions/:id', async (c) => {
@@ -347,30 +308,17 @@ app.get('/', (c) => {
                         <div class="h-64 md:h-80"><canvas id="barChart"></canvas></div>
                     </div>
 
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[500px]">
-                            <div class="flex justify-between items-center mb-4">
-                                <h3 class="font-bold text-slate-700">分類佔比分析</h3>
-                                <div class="flex bg-slate-100 rounded p-0.5">
-                                    <button @click="pieType='EXPENSE'" :class="['text-xs px-3 py-1.5 rounded transition font-bold', pieType==='EXPENSE'?'bg-white shadow text-rose-500':'text-slate-400']">支出</button>
-                                    <button @click="pieType='INCOME'" :class="['text-xs px-3 py-1.5 rounded transition font-bold', pieType==='INCOME'?'bg-white shadow text-emerald-500':'text-slate-400']">收入</button>
-                                </div>
-                            </div>
-                            <div class="flex-1 relative">
-                                <canvas id="pieChart"></canvas>
-                                <div v-if="!hasPieData" class="absolute inset-0 flex items-center justify-center text-slate-300 text-sm">無數據</div>
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[500px]">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="font-bold text-slate-700">分類佔比分析</h3>
+                            <div class="flex bg-slate-100 rounded p-0.5">
+                                <button @click="pieType='EXPENSE'" :class="['text-xs px-3 py-1.5 rounded transition font-bold', pieType==='EXPENSE'?'bg-white shadow text-rose-500':'text-slate-400']">支出</button>
+                                <button @click="pieType='INCOME'" :class="['text-xs px-3 py-1.5 rounded transition font-bold', pieType==='INCOME'?'bg-white shadow text-emerald-500':'text-slate-400']">收入</button>
                             </div>
                         </div>
-
-                        <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[500px]">
-                            <div class="flex justify-between items-center mb-4">
-                                <h3 class="font-bold text-slate-700">常出現的關鍵字 (Top 15)</h3>
-                                <div class="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded">總金額</div>
-                            </div>
-                            <div class="flex-1 relative overflow-hidden">
-                                <canvas id="keywordChart"></canvas>
-                                <div v-if="stats.keywords.length===0" class="absolute inset-0 flex items-center justify-center text-slate-300 text-sm">無數據</div>
-                            </div>
+                        <div class="flex-1 relative">
+                            <canvas id="pieChart"></canvas>
+                            <div v-if="!hasPieData" class="absolute inset-0 flex items-center justify-center text-slate-300 text-sm">無數據</div>
                         </div>
                     </div>
                 </div>
@@ -413,6 +361,7 @@ app.get('/', (c) => {
                                 <div><label class="text-xs font-bold text-slate-400 uppercase mb-1 block">備註</label><input type="text" v-model="form.note" lang="zh-TW" inputmode="text" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-blue-500"></div>
                             </div>
                         </div>
+                        
                         <div class="p-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-3">
                             <button @click="submit" :disabled="isSubmitting" class="bg-slate-900 text-white px-8 py-3 rounded-xl font-bold shadow hover:bg-slate-800 transition disabled:opacity-50 w-full md:w-auto">確認記帳</button>
                         </div>
@@ -590,8 +539,10 @@ app.get('/', (c) => {
         const { createApp, ref, computed, onMounted, watch, nextTick } = Vue
         Chart.register(ChartDataLabels);
 
-        let barChartInstance = null, pieChartInstance = null, keywordChartInstance = null
+        let barChartInstance = null, pieChartInstance = null
         
+        // 初始餘額設定
+        // 更新台新 Richart (ID:6) 為 35030
         const initialBalances = { 1: 170687, 2: 66892, 3: 0, 4: 84565, 5: 620623, 6: 35030, 7: 52917, 8: 0, 9: 887203 }
 
         createApp({
@@ -601,8 +552,9 @@ app.get('/', (c) => {
                 const isDetailMode = ref(false)
                 const dateRange = ref({ start: '', end: '' })
                 const pieType = ref('EXPENSE')
-                const showDataLabels = ref(true)
+                const showDataLabels = ref(true) // 控制數值顯示
                 
+                // Modals & Filters
                 const showEditModal = ref(false)
                 const showCategoryModal = ref(false)
                 const editingId = ref(null)
@@ -614,7 +566,7 @@ app.get('/', (c) => {
                 const categories = ref([]); const accounts = ref([])
                 const recentTransactions = ref([]); const detailTransactions = ref([])
                 const currentAccount = ref(null)
-                const stats = ref({ income: 0, expense: 0, monthly: [], categories: [], keywords: [] })
+                const stats = ref({ income: 0, expense: 0, monthly: [], categories: [] })
 
                 const form = ref({ date: new Date().toISOString().split('T')[0], account_id: '', type: 'EXPENSE', category_id: '', amount_twd: '', note: '', children: [] })
                 const editForm = ref({ date: '', account_id: '', type: 'EXPENSE', category_id: '', amount_twd: '', note: '', children: [] })
@@ -624,9 +576,12 @@ app.get('/', (c) => {
                 watch(isDetailMode, (val) => { if(val && !form.value.children.length) addChild(); if(!val) form.value.children=[] })
                 watch(() => editForm.value.children, (newVal) => { if (isEditDetailMode.value) editForm.value.amount_twd = newVal.reduce((acc, curr) => acc + (Number(curr.amount_twd) || 0), 0) || '' }, { deep: true })
                 watch(isEditDetailMode, (val) => { if(val && !editForm.value.children?.length) addEditChild(); if(!val) editForm.value.children=[] })
-                watch([pieType, showDataLabels], () => renderCharts())
+                watch([pieType, showDataLabels], () => renderCharts()) // 當標籤開關變動時重繪
                 
-                watch(selectedBanks, (val) => { localStorage.setItem('selectedBanks', JSON.stringify(val)) }, { deep: true })
+                // localStorage for Banks
+                watch(selectedBanks, (val) => {
+                    localStorage.setItem('selectedBanks', JSON.stringify(val))
+                }, { deep: true })
 
                 const currentCurrency = computed(() => accounts.value.find(a => a.id === form.value.account_id)?.currency || 'TWD')
                 const selectedAccountName = computed(() => accounts.value.find(a => a.id === form.value.account_id)?.name)
@@ -672,8 +627,11 @@ app.get('/', (c) => {
                     categories.value = c; accounts.value = a
                     
                     const saved = localStorage.getItem('selectedBanks')
-                    if (saved) { selectedBanks.value = JSON.parse(saved) } 
-                    else { selectedBanks.value = a.map(acc => acc.id) }
+                    if (saved) {
+                        selectedBanks.value = JSON.parse(saved)
+                    } else {
+                        selectedBanks.value = a.map(acc => acc.id) 
+                    }
                     
                     if(!form.value.account_id && a.length>0) form.value.account_id = a[0].id
                 }
@@ -686,7 +644,7 @@ app.get('/', (c) => {
                     const data = await res.json()
                     stats.value.income = data.totals.find(t=>t.type==='INCOME')?.total || 0
                     stats.value.expense = data.totals.find(t=>t.type==='EXPENSE')?.total || 0
-                    stats.value.monthly = data.monthly; stats.value.categories = data.categories; stats.value.keywords = data.keywords
+                    stats.value.monthly = data.monthly; stats.value.categories = data.categories
                     if(currentView.value === 'dashboard') nextTick(renderCharts)
                 }
 
@@ -757,9 +715,9 @@ app.get('/', (c) => {
                 }
 
                 const renderCharts = () => {
-                    const ctxBar = document.getElementById('barChart'); const ctxPie = document.getElementById('pieChart'); const ctxKeyword = document.getElementById('keywordChart')
-                    if(!ctxBar || !ctxPie || !ctxKeyword) return
-                    if(barChartInstance) barChartInstance.destroy(); if(pieChartInstance) pieChartInstance.destroy(); if(keywordChartInstance) keywordChartInstance.destroy()
+                    const ctxBar = document.getElementById('barChart'); const ctxPie = document.getElementById('pieChart')
+                    if(!ctxBar || !ctxPie) return
+                    if(barChartInstance) barChartInstance.destroy(); if(pieChartInstance) pieChartInstance.destroy()
 
                     const labels = Array.from({length:12}, (_,i) => \`\${i+1}月\`)
                     const incomeData = labels.map((_, i) => stats.value.monthly.find(m => m.month.endsWith(\`-\${String(i+1).padStart(2,'0')}\`) && m.type==='INCOME')?.total || 0)
@@ -791,51 +749,17 @@ app.get('/', (c) => {
                         type: 'doughnut',
                         data: { labels: finalPieData.map(d => d.name), datasets: [{ data: finalPieData.map(d => d.total), backgroundColor: ['#3b82f6', '#f59e0b', '#10b981', '#f43f5e', '#8b5cf6', '#cbd5e1'], borderWidth: 0 }] },
                         options: { 
-                            responsive: true, maintainAspectRatio: false, cutout: '50%', 
-                            layout: { padding: 40 }, // 為外部標籤留空間
+                            responsive: true, maintainAspectRatio: false, cutout: '60%', 
                             plugins: { 
-                                legend: { display: false }, // 隱藏圖例，直接看標籤
+                                legend: { position: 'right' },
                                 datalabels: { 
-                                    display: true,
-                                    anchor: 'end', align: 'end', offset: 10, // 標籤拉到外面
-                                    color: '#334155', font: { weight: 'bold', size: 12 }, 
-                                    formatter: (val, ctx) => {
-                                        return ctx.chart.data.labels[ctx.dataIndex] + '\\n$' + val.toLocaleString()
-                                    } 
-                                }
+                                    display: true, // 圓餅圖總是顯示
+                                    color: '#fff', font: { weight: 'bold' }, formatter: (val, ctx) => {
+                                    let sum = 0; let dataArr = ctx.chart.data.datasets[0].data;
+                                    dataArr.map(data => { sum += data; });
+                                    return val > 0 ? val.toLocaleString() : '';
+                                } }
                             } 
-                        }
-                    })
-
-                    // Keyword Chart (Horizontal Bar)
-                    const kwLabels = stats.value.keywords.map(k => k.name)
-                    const kwData = stats.value.keywords.map(k => k.total)
-                    
-                    keywordChartInstance = new Chart(ctxKeyword, {
-                        type: 'bar',
-                        data: {
-                            labels: kwLabels,
-                            datasets: [{
-                                label: '金額',
-                                data: kwData,
-                                backgroundColor: '#6366f1',
-                                borderRadius: 4,
-                                barThickness: 15
-                            }]
-                        },
-                        options: {
-                            indexAxis: 'y', // 轉為橫向
-                            responsive: true,
-                            maintainAspectRatio: false,
-                            scales: { x: { display: false }, y: { grid: { display: false } } },
-                            plugins: {
-                                legend: { display: false },
-                                datalabels: {
-                                    anchor: 'end', align: 'end',
-                                    color: '#6366f1', font: { weight: 'bold' },
-                                    formatter: (val) => '$' + val.toLocaleString()
-                                }
-                            }
                         }
                     })
                 }
