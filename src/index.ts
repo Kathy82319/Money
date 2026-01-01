@@ -345,7 +345,7 @@ app.get('/', (c) => {
                             <div v-if="isDetailMode" class="bg-slate-50 rounded-xl border border-slate-200 p-4 space-y-2">
                                 <div v-for="(child, idx) in form.children" :key="idx" class="flex gap-2">
                                     <select v-model="child.category_id" class="w-1/3 bg-white border border-slate-200 rounded-lg px-2 py-2 text-sm focus:border-blue-500"><option v-for="c in filteredCategories" :value="c.id">{{ c.name }}</option></select>
-                                    <input type="text" v-model="child.note" placeholder="備註" class="flex-1 bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:border-blue-500">
+                                    <input type="text" v-model="child.note" placeholder="備註" lang="zh-TW" inputmode="text" class="flex-1 bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:border-blue-500">
                                     <input type="number" v-model="child.amount_twd" class="w-24 bg-white border border-slate-200 rounded-lg px-2 py-2 text-sm text-right font-mono focus:border-blue-500">
                                     <button @click="removeChild(idx)" class="text-slate-400 hover:text-rose-500"><i class="fa-solid fa-xmark"></i></button>
                                 </div>
@@ -353,7 +353,7 @@ app.get('/', (c) => {
                             </div>
                             <div v-else class="grid grid-cols-2 gap-4">
                                 <div><label class="text-xs font-bold text-slate-400 uppercase mb-1 block">分類</label><select v-model="form.category_id" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-blue-500"><option v-for="c in filteredCategories" :value="c.id">{{ c.name }}</option></select></div>
-                                <div><label class="text-xs font-bold text-slate-400 uppercase mb-1 block">備註</label><input type="text" v-model="form.note" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-blue-500"></div>
+                                <div><label class="text-xs font-bold text-slate-400 uppercase mb-1 block">備註</label><input type="text" v-model="form.note" lang="zh-TW" inputmode="text" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-blue-500"></div>
                             </div>
                         </div>
                         
@@ -480,7 +480,7 @@ app.get('/', (c) => {
                             <div v-if="isEditDetailMode" class="bg-slate-50 rounded border p-3 space-y-2 mb-4">
                                 <div v-for="(child, idx) in editForm.children" :key="idx" class="flex gap-2">
                                     <select v-model="child.category_id" class="w-1/3 border rounded text-sm"><option v-for="c in editFilteredCategories" :value="c.id">{{ c.name }}</option></select>
-                                    <input type="text" v-model="child.note" class="flex-1 border rounded text-sm px-2">
+                                    <input type="text" v-model="child.note" class="flex-1 border rounded text-sm px-2" lang="zh-TW" inputmode="text">
                                     <input type="number" v-model="child.amount_twd" class="w-20 border rounded text-sm px-1 text-right">
                                     <button @click="removeEditChild(idx)" class="text-rose-500"><i class="fa-solid fa-xmark"></i></button>
                                 </div>
@@ -488,7 +488,7 @@ app.get('/', (c) => {
                             </div>
                             <div v-else class="grid grid-cols-2 gap-4 mb-4">
                                 <div><label class="text-xs font-bold text-slate-400 mb-1 block">分類</label><select v-model="editForm.category_id" class="w-full border rounded px-3 py-2"><option v-for="c in editFilteredCategories" :value="c.id">{{ c.name }}</option></select></div>
-                                <div><label class="text-xs font-bold text-slate-400 mb-1 block">備註</label><input type="text" v-model="editForm.note" class="w-full border rounded px-3 py-2"></div>
+                                <div><label class="text-xs font-bold text-slate-400 mb-1 block">備註</label><input type="text" v-model="editForm.note" class="w-full border rounded px-3 py-2" lang="zh-TW" inputmode="text"></div>
                             </div>
                         </div>
                         <div class="p-4 border-t bg-slate-50 flex justify-end gap-3">
@@ -507,7 +507,7 @@ app.get('/', (c) => {
                             <button @click="showCategoryModal=false" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
                         </div>
                         <div class="p-4 flex gap-2 border-b">
-                            <input v-model="newCategoryName" type="text" placeholder="輸入新分類名稱" class="flex-1 border rounded px-3 py-2 text-sm">
+                            <input v-model="newCategoryName" type="text" placeholder="輸入新分類名稱" class="flex-1 border rounded px-3 py-2 text-sm" lang="zh-TW" inputmode="text">
                             <select v-model="newCategoryType" class="border rounded px-2 py-2 text-sm">
                                 <option value="EXPENSE">支出</option><option value="INCOME">收入</option><option value="TRANSFER">轉帳</option>
                             </select>
@@ -536,7 +536,9 @@ app.get('/', (c) => {
 
         let barChartInstance = null, pieChartInstance = null
         
-        const initialBalances = { 1: 170687, 2: 66892, 3: 0, 4: 84565, 5: 620623, 6: 35030, 7: 52917, 8: 0, 9: 887203 }
+        // 初始餘額設定
+        // 更新台新 Richart (ID:6) 為 73915
+        const initialBalances = { 1: 170687, 2: 66892, 3: 0, 4: 84565, 5: 620623, 6: 73915, 7: 52917, 8: 0, 9: 887203 }
 
         createApp({
             setup() {
@@ -711,13 +713,13 @@ app.get('/', (c) => {
                     if(!ctxBar || !ctxPie) return
                     if(barChartInstance) barChartInstance.destroy(); if(pieChartInstance) pieChartInstance.destroy()
 
-                    const uniqueMonths = [...new Set(stats.value.monthly.map(m => m.month))]
-                    const incomeData = uniqueMonths.map(m => stats.value.monthly.find(x => x.month===m && x.type==='INCOME')?.total || 0)
-                    const expenseData = uniqueMonths.map(m => stats.value.monthly.find(x => x.month===m && x.type==='EXPENSE')?.total || 0)
+                    const labels = Array.from({length:12}, (_,i) => \`\${i+1}月\`)
+                    const incomeData = labels.map((_, i) => stats.value.monthly.find(m => m.month.endsWith(\`-\${String(i+1).padStart(2,'0')}\`) && m.type==='INCOME')?.total || 0)
+                    const expenseData = labels.map((_, i) => stats.value.monthly.find(m => m.month.endsWith(\`-\${String(i+1).padStart(2,'0')}\`) && m.type==='EXPENSE')?.total || 0)
 
                     barChartInstance = new Chart(ctxBar, {
                         type: 'bar',
-                        data: { labels: uniqueMonths, datasets: [{ label: '收入', data: incomeData, backgroundColor: '#10b981', borderRadius: 4 }, { label: '支出', data: expenseData, backgroundColor: '#f43f5e', borderRadius: 4 }] },
+                        data: { labels, datasets: [{ label: '收入', data: incomeData, backgroundColor: '#10b981', borderRadius: 4 }, { label: '支出', data: expenseData, backgroundColor: '#f43f5e', borderRadius: 4 }] },
                         options: { 
                             responsive: true, maintainAspectRatio: false, 
                             scales: { y: { beginAtZero: true, grid: { display: false } }, x: { grid: { display: false } } },
