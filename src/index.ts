@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import notes from './notes' // 假設您的 notes.ts 還在，若上次是一併寫在 index 則需調整，這裡假設您有保留 notes.ts
+import notes from './notes' 
 
 type Bindings = {
   DB: D1Database
@@ -208,7 +208,7 @@ app.post('/api/transactions', async (c) => {
 })
 
 // ==========================================
-// [FRONTEND]
+// [FRONTEND] Vue + Tailwind + Chart.js + DataLabels
 // ==========================================
 
 app.get('/', (c) => {
@@ -407,11 +407,13 @@ app.get('/', (c) => {
                                     <div v-if="!hasPieData" class="absolute inset-0 flex items-center justify-center text-slate-300 text-sm">無數據</div>
                                 </div>
                                 <div class="w-full md:w-1/2 h-full overflow-y-auto scroller pr-2">
-                                    <div v-if="hasPieData" class="space-y-3">
-                                        <div v-for="(item, idx) in pieChartLegendData" :key="idx" class="flex items-center justify-between text-sm p-2 hover:bg-slate-50 rounded-lg transition">
+                                    <div v-if="hasPieData" class="space-y-2">
+                                        <div v-for="(item, idx) in pieChartLegendData" :key="idx" 
+                                            @click="togglePieSegment(idx)"
+                                            :class="['flex items-center justify-between text-sm p-2 hover:bg-slate-50 rounded-lg transition cursor-pointer select-none', item.hidden ? 'opacity-40 grayscale decoration-slate-400' : '']">
                                             <div class="flex items-center gap-2">
-                                                <span class="w-3 h-3 rounded-full shrink-0 shadow-sm" :style="{backgroundColor: item.color}"></span>
-                                                <span class="text-slate-700 font-bold truncate max-w-[100px]">{{ item.name }}</span>
+                                                <span class="w-3 h-3 rounded-full shrink-0 shadow-sm transition-transform" :class="item.hidden ? 'scale-75' : ''" :style="{backgroundColor: item.color}"></span>
+                                                <span class="text-slate-700 font-bold truncate max-w-[100px]" :class="item.hidden ? 'line-through' : ''">{{ item.name }}</span>
                                             </div>
                                             <div class="text-right">
                                                 <div class="font-mono font-bold text-slate-800">{{ item.amount }}</div>
@@ -514,7 +516,6 @@ app.get('/', (c) => {
                         <i class="fa-solid fa-building-columns absolute -bottom-4 -right-4 text-8xl text-slate-50 group-hover:text-blue-50 transition"></i>
                     </div>
                 </div>
-
                 <div v-if="currentView === 'account_detail'" class="max-w-5xl mx-auto h-full flex flex-col">
                     <div class="bg-white rounded-2xl shadow-lg border border-slate-200 flex-1 flex flex-col overflow-hidden">
                         <div class="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
@@ -552,7 +553,6 @@ app.get('/', (c) => {
                         </div>
                     </div>
                 </div>
-
                 <transition name="modal"><div v-if="showEditModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col"><div class="p-4 bg-slate-900 text-white font-bold flex justify-between items-center"><span>編輯交易</span><button @click="showEditModal=false" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-xl"></i></button></div><div class="p-6 overflow-y-auto scroller"><div class="grid grid-cols-4 gap-2 bg-slate-100 p-1 rounded-xl mb-4"><button v-for="t in ['EXPENSE','INCOME','TRANSFER','TRANSFER_IN']" :key="t" @click="editForm.type=t" :class="['py-2 rounded-lg text-xs font-bold transition', editForm.type===t ? typeColor(t) + ' text-white shadow' : 'text-slate-500']">{{ typeName(t) }}</button></div><div class="grid grid-cols-2 gap-4 mb-4"><div><label class="text-xs font-bold text-slate-400 mb-1 block">日期</label><input type="date" v-model="editForm.date" class="w-full bg-slate-50 border rounded px-3 py-2"></div><div><label class="text-xs font-bold text-slate-400 mb-1 block">帳戶</label><select v-model="editForm.account_id" class="w-full bg-slate-50 border rounded px-3 py-2"><option v-for="acc in accounts" :value="acc.id">{{ acc.name }}</option></select></div></div><div class="mb-4"><label class="text-xs font-bold text-slate-400 mb-1 block">金額</label><input type="number" v-model="editForm.amount_twd" :readonly="isEditDetailMode" class="w-full bg-slate-50 border rounded px-4 py-3 text-2xl font-mono font-bold"><label class="flex items-center gap-2 mt-2 text-xs"><input type="checkbox" v-model="isEditDetailMode"> 明細模式</label></div><div v-if="isEditDetailMode" class="bg-slate-50 rounded border p-3 space-y-2 mb-4"><div v-for="(child, idx) in editForm.children" :key="idx" class="flex gap-2"><select v-model="child.category_id" class="w-1/3 border rounded text-sm"><option v-for="c in editFilteredCategories" :value="c.id">{{ c.name }}</option></select><input type="text" v-model="child.note" class="flex-1 border rounded text-sm px-2" lang="zh-TW" inputmode="text"><input type="number" v-model="child.amount_twd" class="w-20 border rounded text-sm px-1 text-right"><button @click="removeEditChild(idx)" class="text-rose-500"><i class="fa-solid fa-xmark"></i></button></div><button @click="addEditChild" class="text-xs text-blue-600 font-bold">+ 新增明細</button></div><div v-else class="grid grid-cols-2 gap-4 mb-4"><div><label class="text-xs font-bold text-slate-400 mb-1 block">分類</label><select v-model="editForm.category_id" class="w-full border rounded px-3 py-2"><option v-for="c in editFilteredCategories" :value="c.id">{{ c.name }}</option></select></div><div><label class="text-xs font-bold text-slate-400 mb-1 block">備註</label><input type="text" v-model="editForm.note" class="w-full border rounded px-3 py-2" lang="zh-TW" inputmode="text"></div></div></div><div class="p-4 border-t bg-slate-50 flex justify-end gap-3"><button @click="showEditModal=false" class="px-4 py-2 rounded text-slate-500 font-bold">取消</button><button @click="submitEdit" class="px-6 py-2 bg-emerald-600 text-white rounded font-bold shadow">儲存變更</button></div></div></div></transition>
                 <transition name="modal"><div v-if="showCategoryModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[80vh] flex flex-col overflow-hidden"><div class="p-4 bg-slate-800 text-white font-bold flex justify-between items-center"><span>分類管理</span><button @click="showCategoryModal=false" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button></div><div class="p-4 flex gap-2 border-b"><input v-model="newCategoryName" type="text" placeholder="輸入新分類名稱" class="flex-1 border rounded px-3 py-2 text-sm" lang="zh-TW" inputmode="text"><select v-model="newCategoryType" class="border rounded px-2 py-2 text-sm"><option value="EXPENSE">支出</option><option value="INCOME">收入</option><option value="TRANSFER">轉帳</option></select><button @click="addCategory" class="bg-blue-600 text-white px-3 rounded text-sm font-bold">新增</button></div><div class="flex-1 overflow-y-auto p-2"><div v-for="c in categories" :key="c.id" class="flex justify-between items-center p-3 hover:bg-slate-50 border-b last:border-0"><div class="flex items-center gap-3"><span :class="['w-2 h-2 rounded-full', c.type==='EXPENSE'?'bg-rose-500':(c.type==='INCOME'?'bg-emerald-500':'bg-blue-500')]"></span><span class="font-bold text-slate-700">{{ c.name }}</span></div><button @click="deleteCategory(c.id)" class="text-slate-300 hover:text-rose-500"><i class="fa-solid fa-trash-can"></i></button></div></div></div></div></transition>
 
@@ -577,7 +577,7 @@ app.get('/', (c) => {
                 const pieType = ref('EXPENSE')
                 const showDataLabels = ref(true)
                 const isMobile = ref(window.innerWidth < 768)
-                const pieChartLegendData = ref([]) // 新增：儲存圓餅圖列表數據
+                const pieChartLegendData = ref([])
                 
                 const showEditModal = ref(false)
                 const showCategoryModal = ref(false)
@@ -652,6 +652,13 @@ app.get('/', (c) => {
                 const submitEdit = async () => { if(!editForm.value.account_id || !editForm.value.amount_twd) return alert('金額未填'); try { const payloadType = editForm.value.type === 'TRANSFER_IN' ? 'INCOME' : editForm.value.type; const payload = { main: {...editForm.value, type: payloadType}, children: isEditDetailMode.value ? editForm.value.children : [] }; await fetch(\`/api/transactions/\${editingId.value}\`, { method: 'PUT', body: JSON.stringify(payload) }); alert('更新成功'); showEditModal.value = false; fetchData(); fetchRecent(); if(currentView.value==='account_detail') openDetail(currentAccount.value) } catch(e){ alert('錯誤') } }
                 const submit = async () => { if(!form.value.account_id || !form.value.amount_twd) return alert('金額未填'); isSubmitting.value = true; try { const payloadType = form.value.type === 'TRANSFER_IN' ? 'INCOME' : form.value.type; const payload = { main: {...form.value, type: payloadType}, children: isDetailMode.value ? form.value.children : [] }; await fetch('/api/transactions', { method: 'POST', body: JSON.stringify(payload) }); alert('記帳成功'); form.value.amount_twd=''; form.value.children=[]; form.value.note=''; fetchRecent(); fetchData() } catch(e){ alert('錯誤') } finally { isSubmitting.value = false } }
 
+                const togglePieSegment = (index) => {
+                    const meta = pieChartInstance.getDatasetMeta(0)
+                    meta.data[index].hidden = !meta.data[index].hidden
+                    pieChartInstance.update()
+                    pieChartLegendData.value[index].hidden = meta.data[index].hidden
+                }
+
                 const renderCharts = () => {
                     const ctxBar = document.getElementById('barChart'); const ctxPie = document.getElementById('pieChart'); const ctxKeyword = document.getElementById('keywordChart')
                     if(!ctxBar || !ctxPie || !ctxKeyword) return
@@ -674,31 +681,18 @@ app.get('/', (c) => {
                     // Pie Chart & Legend List
                     const pieData = stats.value.categories.filter(c => c.type === pieType.value)
                     const pieTotal = pieData.reduce((sum, c) => sum + c.total, 0)
-                    
-                    // Generate colors (Chart.js default style colors)
                     const bgColors = ['#3b82f6', '#f59e0b', '#10b981', '#f43f5e', '#8b5cf6', '#cbd5e1', '#64748b', '#06b6d4', '#ec4899', '#84cc16']
                     
-                    // Populate List Data
                     pieChartLegendData.value = pieData.map((d, i) => ({
-                        name: d.name,
-                        amount: '$' + d.total.toLocaleString(),
-                        percent: ((d.total / pieTotal) * 100).toFixed(1) + '%',
-                        color: bgColors[i % bgColors.length]
+                        name: d.name, amount: '$' + d.total.toLocaleString(), percent: ((d.total / pieTotal) * 100).toFixed(1) + '%', color: bgColors[i % bgColors.length], hidden: false
                     }))
 
                     pieChartInstance = new Chart(ctxPie, {
                         type: 'doughnut',
-                        data: { 
-                            labels: pieData.map(d => d.name), 
-                            datasets: [{ 
-                                data: pieData.map(d => d.total), 
-                                backgroundColor: bgColors, 
-                                borderWidth: 0 
-                            }] 
-                        },
+                        data: { labels: pieData.map(d => d.name), datasets: [{ data: pieData.map(d => d.total), backgroundColor: bgColors, borderWidth: 0 }] },
                         options: { 
                             responsive: true, maintainAspectRatio: false, cutout: '70%', 
-                            plugins: { legend: { display: false }, datalabels: { display: false } } // Disable text on chart
+                            plugins: { legend: { display: false }, datalabels: { display: false } } 
                         }
                     })
 
@@ -719,7 +713,7 @@ app.get('/', (c) => {
                     navClass, mobileNavClass, typeName, typeColor, formatCurrency, formatAmount, getAmountClass,
                     addChild, removeChild, addEditChild, removeEditChild, showDataLabels, isMobile, pieChartLegendData,
                     changeView, openDetail, fetchRecent, submit, submitEdit, deleteTransaction, fetchStats, resetDateRange, toggleBank,
-                    openEditModal, addCategory, deleteCategory,
+                    openEditModal, addCategory, deleteCategory, togglePieSegment,
                     notesList, currentNote, fetchNotes, createNewNote, selectNote, saveNote, deleteNote, getDay, getMonth, getTagColor, getTagActiveColor, getTagName
                 }
             }
