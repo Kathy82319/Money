@@ -25,7 +25,7 @@ app.get('/api/transactions', async (c) => {
   const limit = c.req.query('limit') || '50'
   
   let sql = `
-      SELECT t.*, c.name as category_name 
+      SELECT t.*, c.name as category_name, c.type as category_type
       FROM transactions t
       LEFT JOIN categories c ON t.category_id = c.id
       WHERE t.parent_id IS NULL 
@@ -59,7 +59,7 @@ app.get('/api/stats', async (c) => {
     const year = c.req.query('year') || '2025'
     
     // 排除 '借入/負債' 和 '帳戶間移轉'
-    const excludeFilter = `AND c.name NOT IN ('借入/負債', '帳戶間移轉', '帳戶間移轉')`
+    const excludeFilter = `AND c.name NOT IN ('借入/負債', '帳戶間移轉')`
 
     const { results: totals } = await c.env.DB.prepare(`
         SELECT t.type, SUM(t.amount_twd) as total 
@@ -260,9 +260,9 @@ app.get('/', (c) => {
                         <div v-if="editingId" class="bg-amber-100 text-amber-800 text-xs font-bold text-center py-1">正在編輯 (ID: {{ editingId }})</div>
 
                         <div class="bg-slate-50 p-4 border-b border-slate-100 flex justify-center">
-                            <div class="flex bg-slate-200/50 p-1 rounded-xl w-full max-w-md">
-                                <button v-for="t in ['EXPENSE','INCOME','TRANSFER']" :key="t" @click="form.type=t"
-                                    :class="['flex-1 py-2 rounded-lg text-sm font-bold transition flex items-center justify-center gap-2', form.type===t ? typeColor(t) + ' text-white shadow-md' : 'text-slate-500 hover:text-slate-700']">
+                            <div class="grid grid-cols-4 gap-2 bg-slate-200/50 p-1 rounded-xl w-full max-w-lg">
+                                <button v-for="t in ['EXPENSE','INCOME','TRANSFER','TRANSFER_IN']" :key="t" @click="form.type=t"
+                                    :class="['py-2 rounded-lg text-sm font-bold transition flex items-center justify-center gap-1', form.type===t ? typeColor(t) + ' text-white shadow-md' : 'text-slate-500 hover:text-slate-700']">
                                     {{ typeName(t) }}
                                 </button>
                             </div>
@@ -416,6 +416,7 @@ app.get('/', (c) => {
                 const currentAccount = ref(null)
                 const stats = ref({ income: 0, expense: 0, monthly: [], categories: [] })
 
+                // TRANSFER_IN 是一個虛擬的前端類型，後端存為 INCOME 但方便我們篩選分類
                 const form = ref({ date: new Date().toISOString().split('T')[0], account_id: '', type: 'EXPENSE', category_id: '', amount_twd: '', note: '', children: [] })
 
                 watch(() => form.value.children, (newVal) => { if (isDetailMode.value) form.value.amount_twd = newVal.reduce((acc, curr) => acc + (Number(curr.amount_twd) || 0), 0) || '' }, { deep: true })
@@ -424,7 +425,16 @@ app.get('/', (c) => {
 
                 const currentCurrency = computed(() => accounts.value.find(a => a.id === form.value.account_id)?.currency || 'TWD')
                 const selectedAccountName = computed(() => accounts.value.find(a => a.id === form.value.account_id)?.name)
-                const filteredCategories = computed(() => categories.value.filter(c => c.type === form.value.type))
+                
+                // 分類篩選邏輯：如果是 TRANSFER_IN，我們要顯示「轉帳類」的分類，但存入資料庫時會變成 INCOME
+                const filteredCategories = computed(() => {
+                    return categories.value.filter(c => {
+                        if (form.value.type === 'TRANSFER_IN') return c.type === 'TRANSFER' // 顯示轉帳類分類
+                        if (form.value.type === 'TRANSFER') return c.type === 'TRANSFER'
+                        return c.type === form.value.type
+                    })
+                })
+
                 const totalNetWorth = computed(() => accounts.value.reduce((sum, acc) => {
                     let rate = 1; if(acc.currency==='JPY') rate=0.21; if(acc.currency==='USD') rate=32;
                     return sum + (acc.balance_twd || 0) * (acc.currency==='TWD'?1:rate)
@@ -433,15 +443,15 @@ app.get('/', (c) => {
 
                 const formatCurrency = (val, cur='TWD') => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: cur, minimumFractionDigits:0 }).format(val || 0)
                 const formatAmount = (t) => formatCurrency(t.amount_twd, accounts.value.find(a=>a.id===t.account_id)?.currency)
-                const typeName = (t) => ({'EXPENSE':'支出','INCOME':'收入','TRANSFER':'轉帳'}[t])
-                const typeColor = (t) => ({'EXPENSE':'bg-rose-500','INCOME':'bg-emerald-500','TRANSFER':'bg-blue-500'}[t])
+                const typeName = (t) => ({'EXPENSE':'支出','INCOME':'收入','TRANSFER':'轉出','TRANSFER_IN':'轉入'}[t])
+                const typeColor = (t) => ({'EXPENSE':'bg-rose-500','INCOME':'bg-emerald-500','TRANSFER':'bg-blue-500','TRANSFER_IN':'bg-emerald-600'}[t])
                 const navClass = (v) => ['w-full text-left px-4 py-2.5 rounded-lg flex items-center gap-3 transition font-medium', currentView.value===v ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:bg-slate-800 hover:text-white']
                 const mobileNavClass = (v) => ['px-4 py-2 rounded-md text-xl transition', currentView.value===v ? 'bg-white shadow text-emerald-600' : 'text-slate-400']
 
                 const getAmountClass = (t) => {
                     if (t.type === 'BALANCE') return ''
                     // 轉帳/借貸：轉入(INCOME)淡綠，轉出(EXPENSE/TRANSFER)淡紅
-                    const isTransfer = t.category_name === '帳戶間移轉' || t.category_name === '借入/負債'
+                    const isTransfer = t.category_name === '帳戶間移轉' || t.category_name === '借入/負債' || t.category_type === 'TRANSFER'
                     if (t.type === 'INCOME') return isTransfer ? 'text-emerald-400' : 'text-emerald-600'
                     return isTransfer ? 'text-rose-400' : 'text-rose-600'
                 }
@@ -498,7 +508,14 @@ app.get('/', (c) => {
                 const editTransaction = (t) => {
                     editingId.value = t.id
                     isDetailMode.value = t.children && t.children.length > 0
-                    form.value = { date: t.date, account_id: t.account_id, category_id: t.category_id, type: t.type, amount_twd: t.amount_twd, note: t.note, children: t.children ? JSON.parse(JSON.stringify(t.children)) : [] }
+                    
+                    // 判斷類型：如果是 INCOME 且分類是轉帳類，前端設為 TRANSFER_IN
+                    let viewType = t.type
+                    if (t.type === 'INCOME' && (t.category_name === '帳戶間移轉' || t.category_type === 'TRANSFER')) {
+                        viewType = 'TRANSFER_IN'
+                    }
+
+                    form.value = { date: t.date, account_id: t.account_id, category_id: t.category_id, type: viewType, amount_twd: t.amount_twd, note: t.note, children: t.children ? JSON.parse(JSON.stringify(t.children)) : [] }
                     changeView('add', false) // false = 不要清空表單
                 }
 
@@ -508,7 +525,10 @@ app.get('/', (c) => {
                     if(!form.value.account_id || !form.value.amount_twd) return alert('金額未填')
                     isSubmitting.value = true
                     try {
-                        const payload = { main: {...form.value}, children: isDetailMode.value ? form.value.children : [] }
+                        // 如果前端選的是 TRANSFER_IN，送出時轉為 INCOME
+                        const payloadType = form.value.type === 'TRANSFER_IN' ? 'INCOME' : form.value.type
+                        const payload = { main: {...form.value, type: payloadType}, children: isDetailMode.value ? form.value.children : [] }
+                        
                         const url = editingId.value ? \`/api/transactions/\${editingId.value}\` : '/api/transactions'
                         const method = editingId.value ? 'PUT' : 'POST'
                         await fetch(url, { method, body: JSON.stringify(payload) })
