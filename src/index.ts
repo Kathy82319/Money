@@ -95,7 +95,6 @@ app.get('/api/stats', async (c) => {
         }
     }
     
-    // 排除分類
     const excludeFilter = ` AND c.name NOT IN ('借入/負債', '帳戶間移轉') AND c.type != 'TRANSFER' `
 
     const { results: totals } = await c.env.DB.prepare(`
@@ -300,7 +299,12 @@ app.get('/', (c) => {
                     </div>
 
                     <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                        <h3 class="font-bold text-slate-700 mb-4">每月收支趨勢</h3>
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="font-bold text-slate-700">每月收支趨勢</h3>
+                            <button @click="showDataLabels = !showDataLabels" :class="['text-xs px-2 py-1 rounded border transition', showDataLabels ? 'bg-slate-100 text-slate-600 border-slate-300' : 'text-slate-400 border-slate-100']">
+                                <i :class="['fa-solid', showDataLabels ? 'fa-eye' : 'fa-eye-slash']"></i> 顯示數值
+                            </button>
+                        </div>
                         <div class="h-64 md:h-80"><canvas id="barChart"></canvas></div>
                     </div>
 
@@ -537,6 +541,8 @@ app.get('/', (c) => {
 
         let barChartInstance = null, pieChartInstance = null
         
+        // 初始餘額設定
+        // 更新台新 Richart (ID:6) 為 35030
         const initialBalances = { 1: 170687, 2: 66892, 3: 0, 4: 84565, 5: 620623, 6: 35030, 7: 52917, 8: 0, 9: 887203 }
 
         createApp({
@@ -546,6 +552,7 @@ app.get('/', (c) => {
                 const isDetailMode = ref(false)
                 const dateRange = ref({ start: '', end: '' })
                 const pieType = ref('EXPENSE')
+                const showDataLabels = ref(true) // 控制數值顯示
                 
                 // Modals & Filters
                 const showEditModal = ref(false)
@@ -569,7 +576,7 @@ app.get('/', (c) => {
                 watch(isDetailMode, (val) => { if(val && !form.value.children.length) addChild(); if(!val) form.value.children=[] })
                 watch(() => editForm.value.children, (newVal) => { if (isEditDetailMode.value) editForm.value.amount_twd = newVal.reduce((acc, curr) => acc + (Number(curr.amount_twd) || 0), 0) || '' }, { deep: true })
                 watch(isEditDetailMode, (val) => { if(val && !editForm.value.children?.length) addEditChild(); if(!val) editForm.value.children=[] })
-                watch(pieType, () => renderCharts())
+                watch([pieType, showDataLabels], () => renderCharts()) // 當標籤開關變動時重繪
                 
                 // localStorage for Banks
                 watch(selectedBanks, (val) => {
@@ -721,8 +728,15 @@ app.get('/', (c) => {
                         data: { labels, datasets: [{ label: '收入', data: incomeData, backgroundColor: '#10b981', borderRadius: 4 }, { label: '支出', data: expenseData, backgroundColor: '#f43f5e', borderRadius: 4 }] },
                         options: { 
                             responsive: true, maintainAspectRatio: false, 
-                            scales: { y: { beginAtZero: true, grid: { display: false } }, x: { grid: { display: false } } },
-                            plugins: { datalabels: { anchor: 'end', align: 'top', font: { weight: 'bold' }, formatter: (val) => val > 0 ? val.toLocaleString() : '' } }
+                            scales: { y: { beginAtZero: true, grid: { display: false }, grace: '10%' }, x: { grid: { display: false } } },
+                            plugins: { 
+                                datalabels: { 
+                                    display: showDataLabels.value,
+                                    anchor: 'end', align: 'end', offset: 0,
+                                    font: { weight: 'bold', size: 11 }, 
+                                    formatter: (val) => val > 0 ? val.toLocaleString() : '' 
+                                } 
+                            }
                         }
                     })
 
@@ -738,7 +752,9 @@ app.get('/', (c) => {
                             responsive: true, maintainAspectRatio: false, cutout: '60%', 
                             plugins: { 
                                 legend: { position: 'right' },
-                                datalabels: { color: '#fff', font: { weight: 'bold' }, formatter: (val, ctx) => {
+                                datalabels: { 
+                                    display: true, // 圓餅圖總是顯示
+                                    color: '#fff', font: { weight: 'bold' }, formatter: (val, ctx) => {
                                     let sum = 0; let dataArr = ctx.chart.data.datasets[0].data;
                                     dataArr.map(data => { sum += data; });
                                     return val > 0 ? val.toLocaleString() : '';
@@ -756,7 +772,7 @@ app.get('/', (c) => {
                     categories, accounts, recentTransactions, detailTransactions, currentAccount, stats, form, 
                     currentCurrency, selectedAccountName, filteredCategories, editFilteredCategories, totalNetWorth, 
                     navClass, mobileNavClass, typeName, typeColor, formatCurrency, formatAmount, getAmountClass,
-                    addChild, removeChild, addEditChild, removeEditChild,
+                    addChild, removeChild, addEditChild, removeEditChild, showDataLabels,
                     changeView, openDetail, fetchRecent, submit, submitEdit, deleteTransaction, fetchStats, resetDateRange, toggleBank,
                     openEditModal, addCategory, deleteCategory
                 }
